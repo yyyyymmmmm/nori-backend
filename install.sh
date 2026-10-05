@@ -52,6 +52,11 @@ if [ -n "$LLM" ]; then
     grep -q "^QL_HERMES_KEY=" .env || echo "QL_HERMES_KEY=${KEY}" >> .env
 fi
 
+# Hermes 上游主链路（stream_api/cron/goal 共用；不注入则容器内 127.0.0.1:9123
+# 打到自己、聊天主链路不通；App 设置页可再覆盖，无需重启）
+grep -q "^STREAM_HERMES_URL=" .env || echo "STREAM_HERMES_URL=http://host.docker.internal:9123/v1/chat/completions" >> .env
+grep -q "^STREAM_HERMES_SESSION=" .env || echo "STREAM_HERMES_SESSION=1" >> .env
+
 mkdir -p data
 echo "→ 构建并启动容器..."
 docker compose up -d --build

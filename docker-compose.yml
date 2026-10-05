@@ -61,6 +61,10 @@ services:
       # === 上游 LLM ===
       QL_HERMES_URL: ${QL_HERMES_URL:-http://host.docker.internal:9123/v1/chat/completions}
       QL_HERMES_KEY: ${QL_HERMES_KEY:-}
+      # === Hermes 上游主链路（stream_api/cron/goal 共用；容器内 127.0.0.1 会打到自己，
+      # 必须显式注入；App 设置页（/api/hermes/upstream）可再覆盖，无需重启）===
+      STREAM_HERMES_URL: ${STREAM_HERMES_URL:-http://host.docker.internal:9123/v1/chat/completions}
+      STREAM_HERMES_SESSION: ${STREAM_HERMES_SESSION:-1}
       
       # === Home Assistant ===
       QL_HA_URL: ${QL_HA_URL:-http://host.docker.internal:8123}
