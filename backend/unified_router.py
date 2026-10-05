@@ -51,7 +51,6 @@ ROUTE_TABLE = {
     "/api/local":     ("local_api",    "Handler"),
     "/api/notes":     ("notes_api",    "Handler"),
     "/api/inbox":     ("inbox_api",    "Handler"),
-    "/api/channel":   ("channel_api",  "Handler"),
     "/api/router":   ("router_api",  "Handler"),
     "/api/mcp":      ("mcp_api",     "Handler"),
     # Hermes 上游配置（App 设置页：上游地址/密钥配置 + 模型列表同步，详见 hermes_api.py）

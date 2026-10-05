@@ -9,6 +9,9 @@
   GET  /api/hermes/models     代理 Hermes /v1/models（无结果回退 /api/model/options），60 秒缓存；
                              每项带 selected 标记当前选中模型
   POST /api/hermes/model      {model_id} → 校验（须在 Hermes 实时模型列表中）后落盘选中
+  GET  /api/hermes/platforms  第三方平台清单：id/name/configured/enabled/needs（token 永不返回）
+  POST /api/hermes/platforms  {platform, enabled, config} → 校验必填项后写 config.yaml
+                             platforms 段并重启 gateway（扫码/配对类平台第一版只读状态）
 
 鉴权：与其他设置类 API 一致（auth_api.check_auth + X-Hermes-Password 头）。
 只依赖标准库。
@@ -19,6 +22,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
 import hermes_upstream
+import hermes_platforms
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -55,6 +59,9 @@ class Handler(BaseHTTPRequestHandler):
     def _is_model(self, path):
         return path.endswith("/hermes/model")
 
+    def _is_platforms(self, path):
+        return path.endswith("/hermes/platforms")
+
     def do_GET(self):
         if not self._check_auth():
             self._send(401, {"error": "未授权"})
@@ -76,6 +83,9 @@ class Handler(BaseHTTPRequestHandler):
                 for m in models:
                     m["selected"] = (m["id"] == sel)
                 self._send(200, {"models": models})
+            return
+        if self._is_platforms(path):
+            self._send(200, {"platforms": hermes_platforms.get_platforms()})
             return
         self._send(404, {"error": "Not Found"})
 
@@ -109,5 +119,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, {"ok": False, "error": err})
                 return
             self._send(200, {"ok": True})
+            return
+        if self._is_platforms(path):
+            pid = str(body.get("platform", "") or "")
+            ok, err, restarted = hermes_platforms.set_platform(
+                pid, body.get("enabled"), body.get("config"))
+            if not ok:
+                self._send(200, {"ok": False, "error": err})
+                return
+            self._send(200, {"ok": True,
+                             "restart": "triggered" if restarted else "failed"})
             return
         self._send(404, {"error": "Not Found"})

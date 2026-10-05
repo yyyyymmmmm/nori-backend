@@ -3326,7 +3326,7 @@ def _relay_query(self):
             "/api/life", "/api/mail",
             # v4.0.15：App 内后端更新 + 版本比对（relay 复验通道需要）
             "/api/selfupdate", "/api/version",
-            "/api/nas/", "/api/hw/", "/api/channel/",
+            "/api/nas/", "/api/hw/",
             "/api/inbox", "/api/history", "/api/tts",
         )
         if not (path.startswith(ALLOWED_RELAY) or path.startswith("/r/")):
