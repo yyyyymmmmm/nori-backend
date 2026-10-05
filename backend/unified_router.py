@@ -57,6 +57,8 @@ ROUTE_TABLE = {
     "/api/hermes":   ("hermes_api",  "Handler"),
     # 借 /api/agent 前缀的别名 → lucky 白名单/relay/nginx 三处零改动（蜂窝下设置页可用）
     "/api/agent/hermes": ("hermes_api", "Handler"),
+    # 技能开关别名（同上；Handler 内同时匹配 /hermes/skills 与 /agent/skills 后缀）
+    "/api/agent/skills": ("hermes_api", "Handler"),
     # Soul 人设配置（App 设置页：查看/编辑 AI 输出风格，详见 soul_api.py）
     "/api/soul":     ("soul_api",    "SoulHandler"),
     # 借 /api/agent 前缀的别名 → lucky 白名单/relay/nginx 三处零改动（蜂窝下设置页可用）

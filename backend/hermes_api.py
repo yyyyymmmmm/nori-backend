@@ -12,6 +12,11 @@
   GET  /api/hermes/platforms  第三方平台清单：id/name/configured/enabled/needs（token 永不返回）
   POST /api/hermes/platforms  {platform, enabled, config} → 校验必填项后写 config.yaml
                              platforms 段并重启 gateway（扫码/配对类平台第一版只读状态）
+  GET  /api/hermes/skills     技能清单：id/name/description/enabled（enabled=不在
+                             config.yaml skills.disabled 列表；与 `hermes skills config`
+                             官方 CLI 读写同一位置）
+  POST /api/hermes/skills     {skill_id, enabled} → 改 skills.disabled 并重启 gateway
+                             （改完必须重启才生效，官方 FAQ 原话）
 
 鉴权：与其他设置类 API 一致（auth_api.check_auth + X-Hermes-Password 头）。
 只依赖标准库。
@@ -23,6 +28,7 @@ from http.server import BaseHTTPRequestHandler
 
 import hermes_upstream
 import hermes_platforms
+import hermes_skills
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -62,6 +68,9 @@ class Handler(BaseHTTPRequestHandler):
     def _is_platforms(self, path):
         return path.endswith("/hermes/platforms")
 
+    def _is_skills(self, path):
+        return path.endswith("/hermes/skills") or path.endswith("/agent/skills")
+
     def do_GET(self):
         if not self._check_auth():
             self._send(401, {"error": "未授权"})
@@ -86,6 +95,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._is_platforms(path):
             self._send(200, {"platforms": hermes_platforms.get_platforms()})
+            return
+        if self._is_skills(path):
+            self._send(200, {"skills": hermes_skills.list_skills()})
             return
         self._send(404, {"error": "Not Found"})
 
@@ -124,6 +136,15 @@ class Handler(BaseHTTPRequestHandler):
             pid = str(body.get("platform", "") or "")
             ok, err, restarted = hermes_platforms.set_platform(
                 pid, body.get("enabled"), body.get("config"))
+            if not ok:
+                self._send(200, {"ok": False, "error": err})
+                return
+            self._send(200, {"ok": True,
+                             "restart": "triggered" if restarted else "failed"})
+            return
+        if self._is_skills(path):
+            sid = str(body.get("skill_id", "") or "")
+            ok, err, restarted = hermes_skills.set_skill(sid, body.get("enabled"))
             if not ok:
                 self._send(200, {"ok": False, "error": err})
                 return
