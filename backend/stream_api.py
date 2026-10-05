@@ -2132,18 +2132,19 @@ def _worker(task_id, task):
             # v3.4.10 X方案：不再带 X-Hermes-Session-Id！根因：Hermes 收到该头即用 state.db
             # 未净化原始会话覆盖外部 messages → 种子上一条 assistant 回复+工具/结果进上下文 → 复读。
             # 现改为去该头 + 发断种子净化历史（_build_hermes_messages），模型用净化上下文，不复读。
-            _amodel = st.get("model") or AGENT_MODEL
+            _amodel = hermes_upstream.effective_model()  # App 选中的 Hermes 模型；未选则 None→不带 model 覆盖
             # v3.5.2：净化历史先拼好（responses 路径要拆成 instructions + input）
             _amsgs = _build_hermes_messages(st, last_user, _route == "agent")
             if HERMES_PROTOCOL == "responses":
                 req_body = _hermes_responses_body(_amodel, st, _amsgs)
             else:
                 req_body = {
-                    "model": _amodel,
                     "messages": _amsgs,
                     "stream": True,
                     "max_tokens": int(os.environ.get("STREAM_MAX_TOKENS", 8192)),
                 }
+                if _amodel is not None:
+                    req_body["model"] = _amodel  # 未选中时不覆盖，Hermes 用自身配置模型
                 if st.get("provider"):
                     req_body["provider"] = st["provider"]
                 else:
@@ -2187,13 +2188,15 @@ def _worker(task_id, task):
         _fresh_sid = "ql_" + uuid.uuid4().hex[:12]
         session_headers, _ = _hermes_session_header(_fresh_sid)
         req_body = {
-            "model": st["model"],
             "messages": _build_hermes_messages(st, last_user, False),
             "stream": True,
             "max_tokens": int(os.environ.get("STREAM_MAX_TOKENS", 8192)),
                 "frequency_penalty": 0.7,
                 "presence_penalty": 0.3,
         }
+        _wamodel = hermes_upstream.effective_model()
+        if _wamodel is not None:
+            req_body["model"] = _wamodel  # 未选中时不覆盖，Hermes 用自身配置模型
         if st.get("provider"):
             req_body["provider"] = st["provider"]
         # 本地模型直连 Ollama（断网兜底）
@@ -2307,6 +2310,9 @@ def _hermes_stream_worker(task_id, task, req_body, headers, last_write, url=None
 def _hermes_responses_body(model, st, msgs):
     """v3.5.2：把 chat/completions 的 messages 转成 Responses API 请求体。
 
+    model 为 App 经 POST /api/hermes/model 选中的模型 id；为 None 时不带 model
+    键，让 Hermes 用自身配置的模型（模型只认 Hermes 一处配置）。
+
     首条 system 平移到 `instructions`（responses 路由把它当 ephemeral system prompt，与
     chat/completions 的等价），其余按序放进 `input` —— 路由取 input[:-1] 当历史、最后一条当
     本轮用户消息，而轻聊发的是「断种子净化历史」，正好对上。`max_tokens`/penalty 这类字段
@@ -2318,12 +2324,13 @@ def _hermes_responses_body(model, st, msgs):
         sys_prompt = items[0].get("content") or ""
         items = items[1:]
     body = {
-        "model": model,
         "input": items,
         "stream": True,
         "store": False,   # 默认 true 会往 response_store.db 落条目，这里不需要
         "provider": st.get("provider") or "deepseek",
     }
+    if model is not None:
+        body["model"] = model
     if sys_prompt:
         body["instructions"] = sys_prompt
     body["model_options"] = _reasoning_options(st.get("reasoning"))   # v3.6.5 档位优先（只影响轻聊）

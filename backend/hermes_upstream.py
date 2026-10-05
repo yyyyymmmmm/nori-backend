@@ -150,22 +150,20 @@ def test_upstream(url, key, timeout=10):
     return False, last_err or "连接失败"
 
 
-def save_upstream(url, key):
-    """落盘上游配置（原子写，0600）。返回 (ok: bool, error_zh: str)。"""
-    base = _normalize_url(url)
-    if not base:
-        return False, "地址格式不正确（示例：http://192.168.1.5:9123）"
-    key = (key or "").strip()
-    d = _data_dir()
+def _persist_merge(updates):
+    """合并落盘（原子写，0600；保留已有字段）。返回 (ok: bool, error_zh: str)。"""
+    d = _load_persisted()
+    d.update(updates)
+    data_dir = _data_dir()
     try:
-        os.makedirs(d, exist_ok=True)
+        os.makedirs(data_dir, exist_ok=True)
     except OSError as e:
         return False, "无法创建数据目录：%s" % e
     path = _config_path()
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".hermes_upstream.", suffix=".tmp")
+    fd, tmp = tempfile.mkstemp(dir=data_dir, prefix=".hermes_upstream.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({"url": base, "key": key}, f, ensure_ascii=False)
+            json.dump(d, f, ensure_ascii=False)
             f.flush()
             os.fsync(f.fileno())
         os.chmod(tmp, 0o600)
@@ -177,11 +175,53 @@ def save_upstream(url, key):
         except OSError:
             pass
         return False, "保存失败：%s" % e
-    with _lock:
-        _models_cache["ts"] = 0.0
-        _models_cache["models"] = None
-        _models_cache["error"] = None
     return True, ""
+
+
+def save_upstream(url, key):
+    """落盘上游配置（原子写，0600；保留已有 model_id 选择）。返回 (ok: bool, error_zh: str)。"""
+    base = _normalize_url(url)
+    if not base:
+        return False, "地址格式不正确（示例：http://192.168.1.5:9123）"
+    key = (key or "").strip()
+    ok, err = _persist_merge({"url": base, "key": key})
+    if ok:
+        with _lock:
+            _models_cache["ts"] = 0.0
+            _models_cache["models"] = None
+            _models_cache["error"] = None
+    return ok, err
+
+
+def get_selected_model():
+    """App 选中的 Hermes 模型 id；从未选过返回 ""。"""
+    return str(_load_persisted().get("model_id") or "").strip()
+
+
+def effective_model():
+    """Hermes 请求实际要带的 model：选中返回其 id，未选中返回 None。
+
+    调用方收到 None 时**不带** model 覆盖，让 Hermes 用自身配置的模型；
+    不回退 App 侧 st["model"] —— 模型只认 Hermes 一处配置。
+    """
+    m = get_selected_model()
+    return m or None
+
+
+def save_selected_model(model_id):
+    """校验并落盘模型选择（保留已有 url/key）。返回 (ok: bool, error_zh: str)。
+
+    model_id 必须出现在 Hermes 实时模型列表中，否则拒绝保存。
+    """
+    mid = str(model_id or "").strip()
+    if not mid:
+        return False, "请选择要使用的模型"
+    models, err = get_models()
+    if err:
+        return False, err
+    if mid not in {m["id"] for m in models}:
+        return False, "该模型在 Hermes 上游不可用：%s" % mid
+    return _persist_merge({"model_id": mid})
 
 
 def _parse_models_v1(data):
