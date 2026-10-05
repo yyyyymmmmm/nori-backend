@@ -148,6 +148,31 @@ curl http://127.0.0.1:9127/api/version
 | `QL_AGENT_URL` | | DeepSeek 官方 | Agent 模式模型端点（需支持 function calling） |
 | `QL_AGENT_KEY` | | 空 | Agent 模式 API Key |
 | `QL_AGENT_MODEL` | | `deepseek-chat` | Agent 模式模型名 |
+| `QL_OAUTH_REDIRECT_BASE` | | 空→用请求 Host 头推导 | OAuth 回调基地址（如 `https://xxx.lucky.com`），厂商授权后浏览器跳回 `…/api/hermes/oauth/callback` |
+| `QL_OAUTH_<VENDOR>_CLIENT_ID` / `QL_OAUTH_<VENDOR>_CLIENT_SECRET` | | 空 | 云服务连接器厂商开发者凭证（VENDOR=FEISHU/DINGTALK/WECOM/TENCENT_DOCS/BAIDU_NETDISK）；商业版内置，自托管用户按下方「连接器 OAuth 配置」注册一次后填入 |
+
+## 🔌 连接器 OAuth 配置
+
+连接器页「云服务」点「连接」走标准 OAuth：用户在厂商授权页点允许，
+浏览器回调本后端换 token，全程不填 URL/Token。token 存
+`{STREAM_DATA_DIR}/oauth_tokens.json`（0600），过期前自动续期。
+
+- **商业版**：开发者凭证由产品方统一注册、内置，开箱即用。
+- **自托管（NAS/Docker）**：每个厂商去其开放平台注册一次应用，
+  回调地址填 `QL_OAUTH_REDIRECT_BASE` + `/api/hermes/oauth/callback`，
+  把拿到的 Client ID / Secret 填进后端环境变量后重启后端：
+
+| 厂商 | 开放平台 | 环境变量 |
+|---|---|---|
+| 飞书 | open.feishu.cn → 开发者后台创建企业自建应用 | `QL_OAUTH_FEISHU_CLIENT_ID` / `QL_OAUTH_FEISHU_CLIENT_SECRET` |
+| 钉钉 | open.dingtalk.com → 创建 H5 微应用/小程序 | `QL_OAUTH_DINGTALK_CLIENT_ID` / `QL_OAUTH_DINGTALK_CLIENT_SECRET` |
+| 企业微信 | work.weixin.qq.com → 应用管理创建自建应用 | `QL_OAUTH_WECOM_CLIENT_ID`（=corpid） / `QL_OAUTH_WECOM_CLIENT_SECRET`（=corpsecret） |
+| 腾讯文档 | docs.qq.com 开放平台 | `QL_OAUTH_TENCENT_DOCS_CLIENT_ID` / `QL_OAUTH_TENCENT_DOCS_CLIENT_SECRET` |
+| 百度网盘 | openapi.baidu.com → 开发者中心创建应用 | `QL_OAUTH_BAIDU_NETDISK_CLIENT_ID` / `QL_OAUTH_BAIDU_NETDISK_CLIENT_SECRET` |
+
+未配置时 App 点「连接」会收到 `oauth_not_configured` 及中文指引，
+不会静默失败。自测：`cd backend && python3 hermes_oauth_test.py`
+（本地 mock 厂商走完全链路，23 项断言）。
 
 ## 🤖 Agent 模式（工具调用）
 

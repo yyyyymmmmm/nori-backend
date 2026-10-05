@@ -17,6 +17,12 @@
                              官方 CLI 读写同一位置）
   POST /api/hermes/skills     {skill_id, enabled} → 改 skills.disabled 并重启 gateway
                              （改完必须重启才生效，官方 FAQ 原话）
+  GET  /api/hermes/oauth/vendors   云服务连接器厂商清单：id/name/capabilities/connected/icon
+  POST /api/hermes/oauth/start      {vendor_id} → {"auth_url"}（点按授权第一步）
+  GET  /api/hermes/oauth/callback  浏览器回调（免鉴权，靠 state 防 CSRF）：code 换 token
+                                   落盘，返回「已完成，请返回 App」HTML
+  POST /api/hermes/oauth/disconnect {vendor_id} → {"ok": true}
+  （以上 oauth 四条另有 /api/agent/oauth/* 别名，借 /api/agent 前缀）
 
 鉴权：与其他设置类 API 一致（auth_api.check_auth + X-Hermes-Password 头）。
 只依赖标准库。
@@ -29,6 +35,7 @@ from http.server import BaseHTTPRequestHandler
 import hermes_upstream
 import hermes_platforms
 import hermes_skills
+import hermes_oauth
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -47,6 +54,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self._cors()
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_html(self, code, html):
+        body = html.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -71,11 +86,36 @@ class Handler(BaseHTTPRequestHandler):
     def _is_skills(self, path):
         return path.endswith("/hermes/skills") or path.endswith("/agent/skills")
 
+    def _is_oauth_vendors(self, path):
+        return (path.endswith("/hermes/oauth/vendors")
+                or path.endswith("/agent/oauth/vendors"))
+
+    def _is_oauth_start(self, path):
+        return (path.endswith("/hermes/oauth/start")
+                or path.endswith("/agent/oauth/start"))
+
+    def _is_oauth_callback(self, path):
+        return (path.endswith("/hermes/oauth/callback")
+                or path.endswith("/agent/oauth/callback"))
+
+    def _is_oauth_disconnect(self, path):
+        return (path.endswith("/hermes/oauth/disconnect")
+                or path.endswith("/agent/oauth/disconnect"))
+
     def do_GET(self):
+        path = urllib.parse.urlparse(self.path).path
+        # OAuth 浏览器回调：免鉴权（浏览器带不上鉴权头），靠 state 防 CSRF；
+        # /start 本身要求鉴权，故 state 只有登录用户能签发。
+        if self._is_oauth_callback(path):
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            code = (qs.get("code") or [""])[0]
+            state = (qs.get("state") or [""])[0]
+            ok, title, msg = hermes_oauth.handle_callback(code, state)
+            self._send_html(200, hermes_oauth.callback_page(ok, title, msg))
+            return
         if not self._check_auth():
             self._send(401, {"error": "未授权"})
             return
-        path = urllib.parse.urlparse(self.path).path
         if self._is_upstream(path):
             key = hermes_upstream.get_key()
             self._send(200, {
@@ -98,6 +138,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._is_skills(path):
             self._send(200, {"skills": hermes_skills.list_skills()})
+            return
+        if self._is_oauth_vendors(path):
+            self._send(200, {"vendors": hermes_oauth.list_vendors()})
             return
         self._send(404, {"error": "Not Found"})
 
@@ -150,5 +193,20 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(200, {"ok": True,
                              "restart": "triggered" if restarted else "failed"})
+            return
+        if self._is_oauth_start(path):
+            vid = str(body.get("vendor_id", "") or "")
+            host = self.headers.get("Host", "")
+            ok, payload = hermes_oauth.start_flow(vid, host)
+            if not ok:
+                self._send(200, {"ok": False, **payload})
+                return
+            self._send(200, {"ok": True, **payload})
+            return
+        if self._is_oauth_disconnect(path):
+            vid = str(body.get("vendor_id", "") or "")
+            ok = hermes_oauth.disconnect(vid)
+            self._send(200, {"ok": ok} if ok else
+                       {"ok": False, "error": "未知厂商：%s" % vid})
             return
         self._send(404, {"error": "Not Found"})
