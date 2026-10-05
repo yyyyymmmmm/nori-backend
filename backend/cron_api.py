@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-import json, os, time, threading, urllib.request, urllib.error, hmac
+import json, os, time, threading, urllib.request, urllib.error, urllib.parse, hmac
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 import hermes_upstream  # Hermes 上游统一解析（App 可配，动态读取免重启）
+import cron_runs  # 定时任务运行历史：本地 jsonl 镜像 + Hermes latest_execution 同步
 
 
 def __getattr__(name):
@@ -22,6 +23,26 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._check_auth():
             self.send_json({'error': 'unauthorized'}, 401)
+            return
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == '/api/cron/runs' or parsed.path.startswith('/api/cron/runs?'):
+            # 运行历史：先从 Hermes 同步最新执行（失败不阻塞，仍返回本地历史）
+            try:
+                synced, notified, sync_err = cron_runs.sync_from_hermes()
+            except Exception:
+                synced, notified, sync_err = 0, 0, '同步异常'
+            qs = urllib.parse.parse_qs(parsed.query)
+            task_id = (qs.get('task_id') or [None])[0]
+            try:
+                limit = int((qs.get('limit') or ['50'])[0])
+            except (ValueError, TypeError):
+                limit = 50
+            self.send_json({
+                'runs': cron_runs.list_runs(task_id, limit),
+                'synced': synced,
+                'notified': notified,
+                'sync_error': sync_err or None,
+            })
             return
         if self.path == '/api/cron/tasks':
             try:
@@ -81,6 +102,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._check_auth():
             self.send_json({'error': 'unauthorized'}, 401)
+            return
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == '/api/cron/runs':
+            # 外部执行器显式上报一条运行记录（失败自动走通知链路）
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length)
+            try:
+                data = json.loads(body.decode('utf-8')) if body else {}
+            except Exception:
+                self.send_json({'ok': False, 'error': 'JSON 解析失败'}, 400)
+                return
+            ok, payload = cron_runs.ingest(data)
+            self.send_json(payload, 200 if ok else 400)
             return
         if self.path == '/api/cron/tasks':
             length = int(self.headers.get('Content-Length', 0))
