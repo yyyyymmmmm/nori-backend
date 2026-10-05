@@ -174,6 +174,61 @@ curl http://127.0.0.1:9127/api/version
 不会静默失败。自测：`cd backend && python3 hermes_oauth_test.py`
 （本地 mock 厂商走完全链路，23 项断言）。
 
+## 🔔 主动通知偏好与频次闸
+
+App 设置页可配，接口 `GET/POST /api/notify/prefs`
+（另有 `/api/agent/notify/prefs` 别名）：
+
+```json
+{"daily_digest": true, "task_fail_notify": true, "max_per_day": 5}
+```
+
+- `daily_digest`：每日摘要开关（每天最多 1 条）
+- `task_fail_notify`：定时任务失败通知开关
+- `max_per_day`：每日主动推送上限（0–50，防打扰）
+
+所有主动推送先过频次闸：超上限或已关闭直接拒绝并返回中文原因；
+偏好落盘 `{STREAM_DATA_DIR}/notify_prefs.json`（0600）。
+
+## ⏰ 定时任务运行历史
+
+Hermes 实际执行定时任务，本后端是代理层：运行历史为本地 jsonl 镜像
+（`{STREAM_DATA_DIR}/cron_runs.jsonl`，0600，保留最近 500 条），
+每次查询 `GET /api/cron/runs?task_id=&limit=` 时先从 Hermes
+`/api/jobs` 的 `latest_execution` 同步（去重键 task_id + finished_at）。
+另有 `POST /api/cron/runs` 供外部执行器显式上报。
+
+失败通知链路：状态命中失败集合、且任务配置未显式关闭
+（`notify_on_fail != False`）、且通知偏好与频次闸放行、且本条未通知过 →
+经推送队列入队，并把 `notified=true` 写回，避免重复打扰；
+未知状态不通知（宁可漏，不可扰）。
+
+## 🧠 从 ChatGPT / Claude / Gemini 导入记忆
+
+`POST /api/memory/import`，宽容解析 `items`（每条取
+content/text/message 字段，支持 ChatGPT 的 `{"parts": [...]}` 形状），
+逐条经 `/api/memory/add` 口径写入（去重、上限 50），返回
+`{"imported": n, "skipped": m}`。
+
+三家产品都没有「一键导出记忆」按钮，取数据的办法：
+
+| 来源 | 做法 |
+|---|---|
+| ChatGPT | 设置 → 个性化 → 记忆，让它「把记住的关于我的事整理成 JSON 数组发我」，复制粘贴为 `items` |
+| Claude | 对话里让它「总结你了解到的关于我的偏好，输出 JSON 数组」，复制粘贴为 `items` |
+| Gemini | 同上；或从 Google Takeout 导出后提取文本条目 |
+
+示例：`{"source": "chatgpt", "items": ["我喜欢喝美式", {"text": "养了一只猫"}]}`
+
+## 📦 数据导出
+
+`GET /api/data/export?format=json`（默认）/ `?format=zip`
+（另有 `/api/agent/data/export` 别名）：打包记忆条目 + Soul 人设 +
+定时任务配置 + 通知偏好，返回文件下载。**不含任何 token/密钥**
+（只取白名单字段，导出前再做键名扫描兜底）。
+
+自测：`cd backend && python3 wave3_test.py`（42 项断言，覆盖四功能）。
+
 ## 🤖 Agent 模式（工具调用）
 
 消息含控制/查询意图（如"帮我查磁盘""把空调关了""生成离家模式"）时，自动切换 **Agent 通道**：直连支持 function calling 的模型（默认 DeepSeek 官方 API），模型可调用工具执行后回填结果：

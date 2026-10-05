@@ -1,11 +1,47 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AI 记忆 API：GET /api/memory/list、POST /api/memory/add|delete|update"""
+"""AI 记忆 API：GET /api/memory/list、POST /api/memory/add|delete|update|import"""
 import json
 import os
 from http.server import BaseHTTPRequestHandler
 
 import memory_store
+
+# 记忆导入支持的来源（POST /api/memory/import 的 source 字段）
+IMPORT_SOURCES = ("chatgpt", "claude", "gemini")
+_IMPORT_ITEM_CAP = 500  # 单次最多处理条数，防刷
+
+
+def _extract_memory_text(item):
+    """宽容解析一条导入条目 → 纯文本；解析不出返回 ""。
+
+    支持形状：
+      - "纯字符串"
+      - {"content": "..."} / {"text": "..."} / {"message": "..."}
+      - {"content": {"parts": [...]}}（ChatGPT conversations 形状）
+      - {"content": ["a", "b"]}（列表拼起来）
+    """
+    if isinstance(item, str):
+        return item.strip()
+    if not isinstance(item, dict):
+        return ""
+    for key in ("content", "text", "message"):
+        v = item.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        if isinstance(v, dict):
+            parts = v.get("parts")
+            if isinstance(parts, list):
+                t = " ".join(str(p).strip() for p in parts
+                             if isinstance(p, str) and p.strip())
+                if t:
+                    return t
+        if isinstance(v, list):
+            t = " ".join(str(p).strip() for p in v
+                         if isinstance(p, str) and p.strip())
+            if t:
+                return t
+    return ""
 
 
 class MemoryHandler(BaseHTTPRequestHandler):
@@ -79,6 +115,37 @@ class MemoryHandler(BaseHTTPRequestHandler):
             ok = memory_store.update_entry(old, new)
             self._send(200, {"ok": ok,
                              "message": "已更新" if ok else "更新失败（原条目不存在或写入出错）",
+                             "entries": memory_store.list_entries()})
+            return
+        if parsed.path.startswith("/api/memory/import"):
+            # 从 ChatGPT / Claude / Gemini 导入记忆：宽容解析 items，
+            # 逐条经 add_entry 口径写入（去重、上限 50 走既有逻辑）。
+            # body 形状：{"source": "chatgpt|claude|gemini", "items": [...]}
+            # 或顶层直接是 [...]。
+            source = str(body.get("source", "") or "").lower() \
+                if isinstance(body, dict) else ""
+            items = body.get("items") if isinstance(body, dict) else None
+            if items is None and isinstance(body, list):
+                items = body
+            if source and source not in IMPORT_SOURCES:
+                self._send(200, {"ok": False,
+                                 "message": "未知来源（支持 chatgpt/claude/gemini）"})
+                return
+            if not isinstance(items, list):
+                self._send(200, {"ok": False, "message": "items 须为数组"})
+                return
+            imported, skipped = 0, 0
+            for it in items[:_IMPORT_ITEM_CAP]:
+                text = _extract_memory_text(it)
+                if not text or len(text) < 2:
+                    skipped += 1
+                    continue
+                if memory_store.add_entry(text):
+                    imported += 1
+                else:
+                    skipped += 1  # 重复或写入失败
+            self._send(200, {"ok": True, "imported": imported,
+                             "skipped": skipped,
                              "entries": memory_store.list_entries()})
             return
         self._send(404, {"error": "Not Found"})

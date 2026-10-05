@@ -112,6 +112,12 @@ ROUTE_TABLE = {
     # 实测 lucky(16666) 只放行了 /api/mail，/api/clouddrive 直连 404 → App 默认地址打不开网盘。
     "/api/agent/clouddrive": ("clouddrive_api", "Handler"),
     "/api/tts":     ("stream_api",     "StreamHandler"),
+    # Wave 3 P1：主动通知偏好（App 设置页；借 /api/agent 前缀 → 三处零改动）
+    "/api/notify":  ("notify_api",   "Handler"),
+    "/api/agent/notify": ("notify_api", "Handler"),
+    # Wave 3 P1：数据导出（设置页「数据控制」；借 /api/agent 前缀 → 三处零改动）
+    "/api/data":    ("data_api",     "Handler"),
+    "/api/agent/data": ("data_api",   "Handler"),
 }
 
 # 缓存已导入的模块和 Handler 类
