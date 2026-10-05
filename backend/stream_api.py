@@ -29,6 +29,7 @@ except Exception:            # 模块缺失也不能让服务起不来（宁可�
 import memory_store
 import media_convert  # v2.0.130: MEDIA:路径→data URL 图片
 import hermes_upstream  # Hermes 上游统一解析（App 设置页可配；取值动态，免重启）
+import soul_store  # Soul 人设用户自定义（App 设置页可配；取值动态，免重启）
 import re
 try:
     import yaml as _yaml  # V1.5.9 同步模型列表用（读 config.yaml 的 provider key）
@@ -1370,7 +1371,7 @@ def _agent_loop(messages, task=None, model=None, provider=None):
         msgs = _break_repeat_seed(msgs)
         sys_content += QCARD_PROMPT   # v3.9.31 ql-card 协议
         sys_content += QLACTION_PROMPT   # v3.9.95 ql-action 本地动作协议
-        sys_content += SOUL_PROMPT    # v3.9.73 soul：输出精炼
+        sys_content += _soul_prompt()    # soul 可配（/api/soul），免重启生效
         sys_content += memory_store.prompt_block()   # v3.9.95 AI 记忆注入（哈希门控稳定前缀）
         sys_p = {"role": "system", "content": sys_content}
         msgs = [sys_p] + msgs
@@ -1618,6 +1619,15 @@ SOUL_PROMPT = (
     "精炼不等于省略：关键步骤、数值、结论必须完整保留。"
 )
 
+
+def _soul_prompt():
+    """Soul 人设动态读取：用户经 /api/soul 自定义过则用自定义，否则用内置默认。
+    落盘即生效，无需重启。"""
+    try:
+        return soul_store.get_soul(SOUL_PROMPT)
+    except Exception:  # noqa: BLE001
+        return SOUL_PROMPT
+
 # v3.9.31：ql-card 结果卡片协议（App 端 v3.5.0 起 AgentCardParser 已解析渲染）。
 # 注入 5 处 system prompt 组装点；纪律段防滥用：仅结构化结果类回复收尾用，闲聊禁用。
 QCARD_PROMPT = (
@@ -1799,7 +1809,7 @@ def _build_messages(st):
                             "不要重复、复述或续写对话历史中你已经回答过的内容。"}]
     base_sys[0]["content"] += QCARD_PROMPT   # v3.9.31 ql-card 协议
     base_sys[0]["content"] += QLACTION_PROMPT   # v3.9.95 ql-action 本地动作协议
-    base_sys[0]["content"] += SOUL_PROMPT    # v3.9.73 soul：输出精炼
+    base_sys[0]["content"] += _soul_prompt()    # soul 可配（/api/soul），免重启生效
     base_sys[0]["content"] += memory_store.prompt_block()   # v3.9.95 AI 记忆注入（哈希门控稳定前缀）
     final = base_sys + kb_inject.inject(msgs)
     _log_sent_messages("normal", final)
@@ -1840,7 +1850,7 @@ def _build_hermes_agent_prompt(st, last_user):
     # v3.9.31 ql-card 协议
     sys_content += QCARD_PROMPT
     sys_content += QLACTION_PROMPT   # v3.9.95 ql-action 本地动作协议
-    sys_content += SOUL_PROMPT    # v3.9.73 soul：输出精炼
+    sys_content += _soul_prompt()    # soul 可配（/api/soul），免重启生效
     sys_content += memory_store.prompt_block()   # v3.9.95 AI 记忆注入（哈希门控稳定前缀）
     # v3.9.72 P0.1 任务化回复
     sys_content += TASK_PROMPT
@@ -1958,7 +1968,7 @@ def _build_hermes_messages(st, last_user, is_agent):
     sys_content += QCARD_PROMPT   # v3.9.31 ql-card 协议
     sys_content += QLACTION_PROMPT   # v3.9.95 ql-action 本地动作协议
     sys_content += TASK_PROMPT   # v3.9.72 P0.1 任务化回复
-    sys_content += SOUL_PROMPT    # v3.9.73 soul：输出精炼
+    sys_content += _soul_prompt()    # soul 可配（/api/soul），免重启生效
     sys_content += memory_store.prompt_block()   # v3.9.95 AI 记忆注入（哈希门控稳定前缀）
     if _ctx_text:
         # v3.9.80：早期对话摘要拼进**首条 system**（Responses 协议只认首条 system 平移到

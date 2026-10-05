@@ -57,6 +57,10 @@ ROUTE_TABLE = {
     "/api/hermes":   ("hermes_api",  "Handler"),
     # 借 /api/agent 前缀的别名 → lucky 白名单/relay/nginx 三处零改动（蜂窝下设置页可用）
     "/api/agent/hermes": ("hermes_api", "Handler"),
+    # Soul 人设配置（App 设置页：查看/编辑 AI 输出风格，详见 soul_api.py）
+    "/api/soul":     ("soul_api",    "SoulHandler"),
+    # 借 /api/agent 前缀的别名 → lucky 白名单/relay/nginx 三处零改动（蜂窝下设置页可用）
+    "/api/agent/soul": ("soul_api",  "SoulHandler"),
     "/api/clouddrive": ("clouddrive_api", "Handler"),
     "/api/diag":     ("diag_api",    "DiagHandler"),
     # v4.0.13：后端版本查询（免鉴权，App「关于」页用；详见 version_api.py 头注释）
