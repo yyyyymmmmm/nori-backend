@@ -23,6 +23,17 @@
                                    落盘，返回「已完成，请返回 App」HTML
   POST /api/hermes/oauth/disconnect {vendor_id} → {"ok": true}
   （以上 oauth 四条另有 /api/agent/oauth/* 别名，借 /api/agent 前缀）
+  POST /api/agent/brief/like   {article_id, liked} → {"ok": true}
+  GET  /api/agent/brief/likes  → {"liked_ids": [...]}
+  GET  /api/agent/action-policy → {"policy": {read_calendar: ask, ...}}（7 类动作）
+  POST /api/agent/action-policy {policy: {...}} → {"ok": true, "policy": {...}}
+  GET  /api/agent/artifacts    → {"artifacts": [...]}（新→旧，上限 200）
+  POST /api/agent/artifacts    {title, kind, content} → {"ok": true, "artifact"}
+  DELETE /api/agent/artifacts  {id} → {"ok": true}
+  POST /api/agent/media/generate {prompt} → 501（如实未配置/未实现，不伪造图片）
+  GET  /api/agent/brief        → {"brief", "status"}
+  POST /api/agent/brief        {brief} → {"status": "not_configured", "articles": []}
+  （以上十条见 agent_prefs.py；借 /api/agent 前缀 → lucky 白名单零改动）
 
 鉴权：与其他设置类 API 一致（auth_api.check_auth + X-Hermes-Password 头）。
 只依赖标准库。
@@ -36,6 +47,7 @@ import hermes_upstream
 import hermes_platforms
 import hermes_skills
 import hermes_oauth
+import agent_prefs
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -47,7 +59,7 @@ class Handler(BaseHTTPRequestHandler):
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Auth-Token, X-Hermes-Password")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 
     def _send(self, code, obj):
         body = json.dumps(obj, ensure_ascii=False).encode()
@@ -102,6 +114,26 @@ class Handler(BaseHTTPRequestHandler):
         return (path.endswith("/hermes/oauth/disconnect")
                 or path.endswith("/agent/oauth/disconnect"))
 
+    # Wave 3 收尾（agent_prefs.py）：资讯点赞 / 动作权限 / 产物沉淀 /
+    # 媒体生成 / 简报口径。统一走 /api/agent 前缀（单后端：App 不本地存）。
+    def _is_brief_like(self, path):
+        return path.endswith("/agent/brief/like")
+
+    def _is_brief_likes(self, path):
+        return path.endswith("/agent/brief/likes")
+
+    def _is_action_policy(self, path):
+        return path.endswith("/agent/action-policy")
+
+    def _is_artifacts(self, path):
+        return path.endswith("/agent/artifacts")
+
+    def _is_media_generate(self, path):
+        return path.endswith("/agent/media/generate")
+
+    def _is_brief(self, path):
+        return path.endswith("/agent/brief")
+
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
         # OAuth 浏览器回调：免鉴权（浏览器带不上鉴权头），靠 state 防 CSRF；
@@ -141,6 +173,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._is_oauth_vendors(path):
             self._send(200, {"vendors": hermes_oauth.list_vendors()})
+            return
+        if self._is_brief_likes(path):
+            self._send(200, {"liked_ids": agent_prefs.get_liked_ids()})
+            return
+        if self._is_action_policy(path):
+            self._send(200, {"policy": agent_prefs.get_policy()})
+            return
+        if self._is_artifacts(path):
+            self._send(200, {"artifacts": agent_prefs.list_artifacts()})
+            return
+        if self._is_brief(path):
+            self._send(200, {"brief": agent_prefs.get_brief(),
+                             "status": "not_configured"})
             return
         self._send(404, {"error": "Not Found"})
 
@@ -208,5 +253,59 @@ class Handler(BaseHTTPRequestHandler):
             ok = hermes_oauth.disconnect(vid)
             self._send(200, {"ok": ok} if ok else
                        {"ok": False, "error": "未知厂商：%s" % vid})
+            return
+        if self._is_brief_like(path):
+            ok, err = agent_prefs.set_like(body.get("article_id"),
+                                           body.get("liked"))
+            self._send(200, {"ok": True} if ok else
+                       {"ok": False, "error": err})
+            return
+        if self._is_action_policy(path):
+            p = body.get("policy")
+            ok, err, policy = agent_prefs.set_policy(
+                p if isinstance(p, dict) else None)
+            self._send(200, {"ok": True, "policy": policy} if ok else
+                       {"ok": False, "error": err})
+            return
+        if self._is_artifacts(path):
+            ok, err, art = agent_prefs.create_artifact(
+                body.get("title"), body.get("kind"), body.get("content"))
+            self._send(200, {"ok": True, "artifact": art} if ok else
+                       {"ok": False, "error": err})
+            return
+        if self._is_media_generate(path):
+            prompt = str(body.get("prompt", "") or "").strip()
+            if not prompt:
+                self._send(200, {"ok": False, "error": "缺少 prompt"})
+                return
+            code, payload = agent_prefs.generate_media(prompt)
+            self._send(code, payload)  # v1 如实 501，绝不伪造图片
+            return
+        if self._is_brief(path):
+            ok, err = agent_prefs.set_brief(body.get("brief"))
+            if not ok:
+                self._send(200, {"ok": False, "error": err})
+                return
+            # v1：只存用户口径；真正的 agent 主笔简报需要内容源管线（后续专项），
+            # 此处不编造文章。
+            self._send(200, {"status": "not_configured", "articles": []})
+            return
+        self._send(404, {"error": "Not Found"})
+
+    def do_DELETE(self):
+        if not self._check_auth():
+            self._send(401, {"error": "未授权"})
+            return
+        path = urllib.parse.urlparse(self.path).path
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(n) or b"{}") if n else {}
+        except Exception:  # noqa: BLE001
+            body = {}
+        if self._is_artifacts(path):
+            if agent_prefs.delete_artifact(body.get("id")):
+                self._send(200, {"ok": True})
+            else:
+                self._send(200, {"ok": False, "error": "not_found"})
             return
         self._send(404, {"error": "Not Found"})

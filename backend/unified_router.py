@@ -61,6 +61,12 @@ ROUTE_TABLE = {
     "/api/agent/skills": ("hermes_api", "Handler"),
     # OAuth 连接器别名（Handler 内同时匹配 /hermes/oauth/* 与 /agent/oauth/* 后缀）
     "/api/agent/oauth": ("hermes_api", "Handler"),
+    # Wave 3 收尾：资讯点赞/动作权限/产物沉淀/媒体生成/简报口径（agent_prefs.py；
+    # Handler 内按 /agent/* 后缀匹配，借 /api/agent 前缀 → lucky 白名单零改动）
+    "/api/agent/brief":         ("hermes_api", "Handler"),
+    "/api/agent/action-policy": ("hermes_api", "Handler"),
+    "/api/agent/artifacts":     ("hermes_api", "Handler"),
+    "/api/agent/media":         ("hermes_api", "Handler"),
     # Soul 人设配置（App 设置页：查看/编辑 AI 输出风格，详见 soul_api.py）
     "/api/soul":     ("soul_api",    "SoulHandler"),
     # 借 /api/agent 前缀的别名 → lucky 白名单/relay/nginx 三处零改动（蜂窝下设置页可用）

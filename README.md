@@ -229,6 +229,26 @@ content/text/message 字段，支持 ChatGPT 的 `{"parts": [...]}` 形状），
 
 自测：`cd backend && python3 wave3_test.py`（42 项断言，覆盖四功能）。
 
+## 📰 资讯点赞 / 动作权限 / 产物沉淀 / 媒体生成 / 简报口径
+
+Wave 3 收尾：iOS 已按以下契约写好 UI，后端补齐真接口
+（`backend/agent_prefs.py`），全部落盘 `{STREAM_DATA_DIR}` 下 0600 文件，
+App 是纯控制平面：
+
+| 接口 | 说明 |
+|---|---|
+| `POST /api/agent/brief/like` `{article_id, liked}` / `GET /api/agent/brief/likes` | 资讯点赞，`brief_likes.json` |
+| `GET/POST /api/agent/action-policy` | 7 类动作默认策略（read_calendar/read_contacts/send_message/web_search/file_rw/device_control/media_generate，值 allow/ask/deny，默认 ask），`action_policy.json`。**删除类操作后端永远单独确认，不受 policy 影响** |
+| `GET/POST/DELETE /api/agent/artifacts` | 产物沉淀（id/title/kind/content/created_at），上限 200 条（新→旧，淘汰最旧），`artifacts.json` |
+| `POST /api/agent/media/generate` `{prompt}` | v1 如实返回 **501** `media_not_configured`（无 `QL_MEDIA_API_KEY` 时）/ `media_not_implemented`（有凭证但管线未接时）；**绝不伪造图片** |
+| `GET/POST /api/agent/brief` | 简报口径：v1 只存用户口径，返回 `{"status":"not_configured","articles":[]}` |
+
+> **简报引擎说明**：真正的 agent 主笔简报需要内容源管线
+> （资讯源接入 → agent 撰写 → 定时投递），属后续专项；
+> v1 不编造文章，`POST /api/agent/brief` 只保存用户口径偏好。
+
+自测：`cd backend && python3 agent_prefs_test.py`（32 项断言）。
+
 ## 🤖 Agent 模式（工具调用）
 
 消息含控制/查询意图（如"帮我查磁盘""把空调关了""生成离家模式"）时，自动切换 **Agent 通道**：直连支持 function calling 的模型（默认 DeepSeek 官方 API），模型可调用工具执行后回填结果：
