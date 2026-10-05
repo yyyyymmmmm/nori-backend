@@ -27,9 +27,16 @@ import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime
+import hermes_upstream  # Hermes 上游统一解析（App 可配，动态读取免重启）
 
-HERMES_API = "http://127.0.0.1:9123"
-HERMES_KEY = os.environ.get("STREAM_HERMES_KEY") or os.environ.get("QL_AGENT_KEY") or ""
+
+def __getattr__(name):
+    # PEP 562：HERMES_API / HERMES_KEY 动态读取，保持原有访问形式不变
+    if name == "HERMES_API":
+        return hermes_upstream.get_base_url()
+    if name == "HERMES_KEY":
+        return hermes_upstream.get_key()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 GOALS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "..", "data", "goals.json")

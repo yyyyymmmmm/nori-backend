@@ -17,9 +17,17 @@
 import json, os, time, threading, urllib.request, urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
+import hermes_upstream  # Hermes 上游统一解析（App 可配，动态读取免重启）
 
-HERMES_API = 'http://127.0.0.1:9123'
-HERMES_KEY = os.environ.get("STREAM_HERMES_KEY") or os.environ.get("QL_AGENT_KEY") or ""
+
+def __getattr__(name):
+    # PEP 562：HERMES_API / HERMES_KEY 动态读取，保持原有访问形式不变
+    #（原硬编码 127.0.0.1:9123 注释：容器内直连，绕开 9127 的 token 门——现由配置决定）
+    if name == "HERMES_API":
+        return hermes_upstream.get_base_url()
+    if name == "HERMES_KEY":
+        return hermes_upstream.get_key()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 CRON_PASSWORD = os.environ.get("QL_PASSWORD", "")
 DATA_DIR = os.environ.get("QL_LIFE_DIR", "/volume1/docker/hermes/微信文件/轻聊web/data")
 GOALS_FILE = os.path.join(DATA_DIR, "goals.json")

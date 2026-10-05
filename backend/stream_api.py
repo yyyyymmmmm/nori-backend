@@ -28,6 +28,7 @@ except Exception:            # 模块缺失也不能让服务起不来（宁可�
     ctx_summary = None
 import memory_store
 import media_convert  # v2.0.130: MEDIA:路径→data URL 图片
+import hermes_upstream  # Hermes 上游统一解析（App 设置页可配；取值动态，免重启）
 import re
 try:
     import yaml as _yaml  # V1.5.9 同步模型列表用（读 config.yaml 的 provider key）
@@ -52,8 +53,19 @@ MAX_CONTEXT_MESSAGES = int(os.environ.get("STREAM_MAX_CONTEXT_MSGS", 40))  # 上
 MAX_MEDIA_BYTES = int(os.environ.get("QL_MAX_MEDIA_BYTES", 32 * 1024 * 1024))
 DATA_DIR = os.environ.get("STREAM_DATA_DIR", "/data/streams_data")
 STREAM_DIR = os.path.join(DATA_DIR, "streams")
-HERMES_URL = os.environ.get("STREAM_HERMES_URL", "http://127.0.0.1:9123/v1/chat/completions")
-HERMES_KEY = os.environ.get("STREAM_HERMES_KEY", "")
+# Hermes 上游地址/Key 改为动态读取（hermes_upstream 模块）：App 经
+# /api/hermes/upstream 改完即时生效，无需重启容器。对外保持
+# stream_api.HERMES_URL / HERMES_KEY / HERMES_RESPONSES_URL 的访问形式不变
+#（tool_executor 等模块照常用），由下方 __getattr__ 按需解析。
+def __getattr__(name):
+    # PEP 562 模块级动态属性
+    if name == "HERMES_URL":
+        return hermes_upstream.chat_completions_url()
+    if name == "HERMES_KEY":
+        return hermes_upstream.get_key()
+    if name == "HERMES_RESPONSES_URL":
+        return hermes_upstream.responses_url()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 # 本地模型（provider=local）直连 Ollama 的基址。
 # 2026-10-01 修：此前此处与「断网兜底」分支各硬编码一个地址（一个是 NAS 内网地址、一个是 127.0.0.1，
 # 且都没读已有的 QL_OLLAMA_URL），导致换机器/改端口必须改代码。现统一由环境变量注入，
@@ -81,11 +93,8 @@ def _reasoning_options(mode=None):
 # 收尾总结）落不到那条流；responses 出口的 collect_result 会在「本轮无 delta」时补发 final_response，
 # 于是轻聊与微信通道的观感对齐（微信侧能看到「先回一版总结」，轻聊以前是空回复）。
 # 回退：STREAM_HERMES_PROTOCOL=chat（容器 env）。
-HERMES_RESPONSES_URL = os.environ.get(
-    "STREAM_HERMES_RESPONSES_URL",
-    (HERMES_URL[:-len("/v1/chat/completions")] + "/v1/responses")
-    if HERMES_URL.endswith("/v1/chat/completions")
-    else HERMES_URL.rsplit("/", 1)[0] + "/v1/responses")
+# HERMES_RESPONSES_URL 现由模块 __getattr__ 动态解析（hermes_upstream.responses_url()），
+# 语义不变：STREAM_HERMES_RESPONSES_URL 显式覆盖优先，否则由上游基地址派生。
 HERMES_PROTOCOL = (os.environ.get("STREAM_HERMES_PROTOCOL", "responses") or "responses").strip().lower()
 WRITE_INTERVAL = 0.3  # 写盘节流
 TASK_TTL = 1800       # 任务完成后内存保留 30 分钟
@@ -426,10 +435,11 @@ def _collect_nas_status():
         services["qingliao_mem"] = None
         services["qingliao_docker_mem"] = None
     try:
-        # v2.0.102c：读 STREAM_HERMES_KEY（qingliao.service 注入；原 HERMES_KEY 为空 → 401）+
+        # v2.0.102c：读动态 HERMES_KEY（hermes_upstream：持久化配置 > STREAM_HERMES_KEY；
+        # 原直接读 env，App 改完设置不重启不生效）+
         #           健康检查打 /health（原打 /v1/chat/completions 是 POST 端点，GET 恒 405 → 永远误判离线）
-        hkey = os.environ.get("STREAM_HERMES_KEY", "")
-        health_url = os.environ.get("STREAM_HERMES_HEALTH_URL", "http://127.0.0.1:9123/health")
+        hkey = HERMES_KEY
+        health_url = os.environ.get("STREAM_HERMES_HEALTH_URL", "") or hermes_upstream.health_url()
         r = subprocess.run(["curl", "-s", "-m", "3", "-o", "/dev/null", "-w", "%{http_code}",
                             "-H", "Authorization: Bearer " + hkey, health_url], capture_output=True, text=True, timeout=8)
         services["hermes"] = r.stdout.strip() == "200"

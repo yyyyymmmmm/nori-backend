@@ -2,12 +2,17 @@
 import json, os, time, threading, urllib.request, urllib.error, hmac
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
+import hermes_upstream  # Hermes 上游统一解析（App 可配，动态读取免重启）
 
-HERMES_API = 'http://127.0.0.1:9123'
-# v3.0.6 security review：Hermes Bearer key / cron 口令改用已有环境变量注入（源码不落硬编码密钥）
-import os as _os
-HERMES_KEY = _os.environ.get("STREAM_HERMES_KEY") or _os.environ.get("QL_AGENT_KEY") or ""
-CRON_PASSWORD = _os.environ.get("QL_PASSWORD", "")
+
+def __getattr__(name):
+    # PEP 562：HERMES_API / HERMES_KEY 动态读取，保持原有访问形式不变
+    if name == "HERMES_API":
+        return hermes_upstream.get_base_url()
+    if name == "HERMES_KEY":
+        return hermes_upstream.get_key()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+CRON_PASSWORD = os.environ.get("QL_PASSWORD", "")
 
 class Handler(BaseHTTPRequestHandler):
     def _check_auth(self):
