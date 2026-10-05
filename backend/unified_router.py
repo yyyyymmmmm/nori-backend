@@ -54,6 +54,10 @@ ROUTE_TABLE = {
     "/api/channel":   ("channel_api",  "Handler"),
     "/api/router":   ("router_api",  "Handler"),
     "/api/mcp":      ("mcp_api",     "Handler"),
+    # Hermes 上游配置（App 设置页：上游地址/密钥配置 + 模型列表同步，详见 hermes_api.py）
+    "/api/hermes":   ("hermes_api",  "Handler"),
+    # 借 /api/agent 前缀的别名 → lucky 白名单/relay/nginx 三处零改动（蜂窝下设置页可用）
+    "/api/agent/hermes": ("hermes_api", "Handler"),
     "/api/clouddrive": ("clouddrive_api", "Handler"),
     "/api/diag":     ("diag_api",    "DiagHandler"),
     # v4.0.13：后端版本查询（免鉴权，App「关于」页用；详见 version_api.py 头注释）
