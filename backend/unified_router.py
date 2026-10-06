@@ -61,6 +61,8 @@ ROUTE_TABLE = {
     "/api/agent/skills": ("hermes_api", "Handler"),
     # OAuth 连接器别名（Handler 内同时匹配 /hermes/oauth/* 与 /agent/oauth/* 后缀）
     "/api/agent/oauth": ("hermes_api", "Handler"),
+    # 后台任务（"一边干活一边对话"：独立 session、进度、取消、完成通知；详见 agent_tasks.py）
+    "/api/agent/tasks": ("agent_tasks", "Handler"),
     # Wave 3 收尾：资讯点赞/动作权限/产物沉淀/媒体生成/简报口径（agent_prefs.py；
     # Handler 内按 /agent/* 后缀匹配，借 /api/agent 前缀 → lucky 白名单零改动）
     "/api/agent/brief":         ("hermes_api", "Handler"),
