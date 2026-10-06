@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""动态 feed API（I 线，2026-10-06）：供 iOS 资讯 tab（对标 Muse「动态」页）。
+"""动态 feed API（I 线，2026-10-06；2026-10-07 加历史+分页+配图）：供 iOS 资讯 tab。
 
-GET /api/feed/units?prompt=...&limit=6&refresh=1 → [...FeedUnit...]
-  ※ 顶层就是数组（iOS 侧直接 decode [FeedUnit]，不要包 {"ok":...}）。
+GET /api/feed/units?prompt=...&limit=6&offset=0&paged=1&refresh=1
+  · 默认返回顶层数组（兼容老 iOS）
+  · paged=1 返回 {units, offset, has_more, total}
   FeedUnit = {"id","title","bodyMarkdown","category":"tech|ai|oss",
               "imageURL":null,"publishedAt":"ISO8601","likes":0}
 
-链路：Hermes 上游（hermes_upstream 动态取 base/key）→ POST /v1/chat/completions
-      非流式 → 模型按用户兴趣提示词生成 JSON 卡片 → 校验归一化 → 落缓存 → 返回。
+链路：Hermes 上游 → 生成 JSON 卡片 → 校验归一化 → 从原文提取 og:image
+      → 追加历史（最多 200 条）→ 返回分页。
 
-关键约束（iOS 侧现状决定）：
-· iOS FeedStore 超时只有 8s，AI 生成必然超时 → GET 永不阻塞：缓存命中直接返回；
-  缓存过期/缺失时起后台线程再生，本次先返回旧缓存或 []。
-· 无上游/无 key/模型失败 → 200 []（iOS 显示诚实空态，不编造）。
-· imageURL 一律 null（不编造图片地址）；likes 恒 0（点赞 iOS 本地管）。
-· 鉴权：X-Auth-Token 标准头；另兼容 iOS FeedStore 只发的 Authorization: Bearer。
+图片：从 bodyMarkdown 里的真实新闻链接抓 og:image，不编造；抓不到就 null。
 """
 import hashlib
 import json
@@ -29,6 +25,8 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 
 CACHE_FILE = "/tmp/qingliao_feed_cache.json"
+HISTORY_FILE = os.path.join(os.path.dirname(CACHE_FILE), "qingliao_feed_history.json")
+HISTORY_MAX = 200  # 最多保留 200 条历史
 CACHE_TTL = 6 * 3600          # 动态 6 小时一刷
 DEFAULT_PROMPT = "我的兴趣动态版块，围绕三块内容：科技圈的新动态、AI 圈的进展、好玩的开源项目。"
 DEFAULT_LIMIT = 6
@@ -94,6 +92,62 @@ def _extract_json_array(text):
         return []
 
 
+def _extract_first_url(text):
+    """从 markdown 文本提取第一个 http(s) 链接。"""
+    if not text:
+        return None
+    m = re.search(r'https?://[^\s\)\]]+', text)
+    return m.group(0) if m else None
+
+
+def _fetch_og_image(url, timeout=10):
+    """抓新闻原文的 og:image。失败返回 None（不编造）。"""
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; NoriFeed/1.0)",
+        }, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            # 只读前 200KB（og:image 一般在 head 里）
+            html = resp.read(204800).decode("utf-8", "replace")
+        # 找 og:image
+        m = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+                      html, re.I)
+        if not m:
+            m = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+                          html, re.I)
+        if m:
+            img = m.group(1).strip()
+            if img.startswith(("http://", "https://")):
+                return img
+            # 相对路径转绝对
+            if img.startswith("//"):
+                return "https:" + img
+            if img.startswith("/"):
+                from urllib.parse import urlparse
+                p = urlparse(url)
+                return "%s://%s%s" % (p.scheme, p.netloc, img)
+    except Exception:
+        pass
+    return None
+
+
+def _enrich_images(units):
+    """为没有配图的资讯从原文提取 og:image（后台线程跑，不阻塞）。"""
+    for u in units:
+        if not isinstance(u, dict):
+            continue
+        if u.get("imageURL"):
+            continue  # 已有图的不动
+        body = u.get("bodyMarkdown") or ""
+        url = _extract_first_url(body)
+        if not url:
+            continue
+        img = _fetch_og_image(url)
+        if img:
+            u["imageURL"] = img
+    return units
+
+
 def _normalize_units(raw):
     """模型原始数组 → iOS FeedUnit 形状；缺字段/坏时间的卡片修掉，修不好就丢（不编造）。"""
     now = datetime.now(timezone.utc)
@@ -144,6 +198,46 @@ def _normalize_units(raw):
     return uniq
 
 
+def _read_history():
+    """读资讯历史（新→旧排序）。"""
+    try:
+        if os.path.exists(HISTORY_FILE):
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                h = json.load(f)
+                if isinstance(h, list):
+                    return h
+    except Exception:
+        pass
+    return []
+
+
+def _append_history(new_units):
+    """新资讯追加到历史头部，去重，截断到 HISTORY_MAX。"""
+    if not new_units:
+        return
+    hist = _read_history()
+    seen = {u.get("id") for u in hist if isinstance(u, dict)}
+    added = 0
+    for u in new_units:
+        if not isinstance(u, dict):
+            continue
+        uid = u.get("id")
+        if uid and uid not in seen:
+            hist.insert(added, u)
+            seen.add(uid)
+            added += 1
+    # 截断
+    if len(hist) > HISTORY_MAX:
+        hist = hist[:HISTORY_MAX]
+    try:
+        tmp = HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(hist, f, ensure_ascii=False)
+        os.replace(tmp, HISTORY_FILE)
+    except Exception:
+        pass
+
+
 def _read_cache():
     try:
         if os.path.exists(CACHE_FILE):
@@ -163,6 +257,8 @@ def _write_cache(prompt, units):
             json.dump({"prompt": prompt, "units": units, "updated_at": time.time()},
                       f, ensure_ascii=False)
         os.replace(tmp, CACHE_FILE)
+        # 2026-10-07：新资讯追加到历史（分页用）
+        _append_history(units)
     except Exception:
         pass
 
@@ -203,6 +299,8 @@ def _regen_worker(prompt, limit):
     try:
         units = _generate(prompt, limit)
         if units:  # 只有成功才覆盖缓存；失败保留旧缓存（不断流）
+            # 2026-10-07：从新闻原文提取配图
+            _enrich_images(units)
             _write_cache(prompt, units)
     except Exception:
         pass
@@ -275,19 +373,42 @@ class FeedHandler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             limit = DEFAULT_LIMIT
         limit = max(1, min(MAX_LIMIT, limit))
+        # 2026-10-07：分页参数
+        try:
+            offset = int(qs.get("offset", ["0"])[0])
+        except (TypeError, ValueError):
+            offset = 0
+        offset = max(0, offset)
         force = (qs.get("refresh", [""])[0] or "").lower() in ("1", "true", "yes")
+        # paged=1 时返回 {units, has_more} 对象；默认返回数组（兼容老 iOS）
+        want_paged = (qs.get("paged", [""])[0] or "").lower() in ("1", "true", "yes")
 
         cached = _read_cache()
         same_prompt = bool(cached) and cached.get("prompt") == prompt
         fresh = same_prompt and (time.time() - cached.get("updated_at", 0)) < CACHE_TTL \
             and bool(cached.get("units"))
+        # 2026-10-07：从历史取（分页用），没有历史则用缓存
+        hist = _read_history()
+        all_units = hist if hist else (cached["units"] if cached else [])
         if fresh and not force:
-            self._send(200, cached["units"][:limit])
+            page = all_units[offset:offset + limit]
+            if want_paged:
+                self._send(200, {"units": page, "offset": offset,
+                                 "has_more": offset + limit < len(all_units),
+                                 "total": len(all_units)})
+            else:
+                self._send(200, page)
             return
         # 过期/缺失/换了提示词 → 后台再生，本次先回旧数据或 []（iOS 8s 超时内必须返回）
         _kick_regen(prompt, limit)
-        units = cached["units"] if same_prompt else []
-        self._send(200, (units or [])[:limit])
+        units = all_units if same_prompt else []
+        page = (units or [])[offset:offset + limit]
+        if want_paged:
+            self._send(200, {"units": page, "offset": offset,
+                             "has_more": offset + limit < len(units or []),
+                             "total": len(units or [])})
+        else:
+            self._send(200, page)
 
     def log_message(self, fmt, *args):
         pass
