@@ -76,7 +76,30 @@ class MemoryHandler(BaseHTTPRequestHandler):
         import urllib.parse
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path.startswith("/api/memory/list"):
-            self._send(200, {"ok": True, "entries": memory_store.list_entries()})
+            entries = memory_store.list_entries()
+            # 2026-10-07：同时返回 Hermes 真实记忆（唯一真源）
+            # iOS 记忆页会合并展示
+            try:
+                import hermes_inspect
+                hermes_mem = hermes_inspect.get_hermes_memory()
+                hermes_text = ""
+                if hermes_mem.get("MEMORY.md"):
+                    hermes_text += hermes_mem["MEMORY.md"][:2000]
+                if hermes_mem.get("USER.md"):
+                    hermes_text += "\n\n--- 关于用户 ---\n" + hermes_mem["USER.md"][:1000]
+                if hermes_text.strip():
+                    # 作为特殊条目插入最前面
+                    entries = [{
+                        "text": hermes_text.strip(),
+                        "status": "active",
+                        "source": "hermes",
+                        "sessionId": "",
+                        "created": None,
+                        "updated": None,
+                    }] + entries
+            except Exception:
+                pass
+            self._send(200, {"ok": True, "entries": entries})
             return
         self._send(404, {"error": "Not Found"})
 
