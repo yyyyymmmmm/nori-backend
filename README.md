@@ -1,6 +1,17 @@
 # 轻聊后端（Qingliao Backend）
 
-家庭 NAS 上的 AI 助手后端服务，纯 Python 标准库为主（第三方只有 `paramiko` / `cryptography` / `PyYAML` / `PyMuPDF`）。为 [轻聊 iOS/Web 客户端提供 AI 对话流式代理、会话同步、文件管理、智能家居（Home Assistant）代理、Docker 管理、知识库、定时任务、密码管理等 API。
+家庭 NAS 上的 AI 助手后端服务，纯 Python 标准库为主（第三方只有 `paramiko` / `cryptography` / `PyYAML` / `PyMuPDF`）。
+
+## 架构
+
+**一个后端，对外一个"Hermes 服务"**：
+
+- **Python 应用层**（本仓库）：会话/任务/记忆/文件/TTS/看板等 API
+- **Hermes 引擎**（`nousresearch/hermes-agent` Docker 镜像）：跑模型和 agent loop，OpenAI 兼容接口
+
+App 只对接 Hermes 服务的一个 API 面，不感知内部两层。Hermes 上游地址/key 是服务端内部配置（`STREAM_HERMES_URL`/`STREAM_HERMES_KEY`），App 端不配置。
+
+用户可配置项（TTS 密钥、模型选择、Home Assistant 等）全部走后端 API，App 内完成，**零 SSH**。
 
 ## ✨ 功能
 
@@ -36,7 +47,7 @@
 ## 🚀 快速开始（一键安装）
 
 ```bash
-git clone https://github.com/lxm20060513-svg/qingliao-backend.git
+git clone https://github.com/yyyyymmmmm/qingliao-backend.git
 cd qingliao-backend
 bash install.sh
 ```
@@ -47,7 +58,7 @@ bash install.sh
 <summary>手动部署（不用脚本）</summary>
 
 ```bash
-git clone https://github.com/lxm20060513-svg/qingliao-backend.git
+git clone https://github.com/yyyyymmmmm/qingliao-backend.git
 cd qingliao-backend
 # 编辑 docker-compose.yml 设置 QL_PASSWORD 等环境变量
 docker compose up -d
