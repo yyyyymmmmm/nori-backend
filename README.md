@@ -1,4 +1,4 @@
-# 轻聊后端（Qingliao Backend）
+# Nori 后端（Nori Backend）
 
 家庭 NAS 上的 AI 助手后端服务，纯 Python 标准库为主（第三方只有 `paramiko` / `cryptography` / `PyYAML` / `PyMuPDF`）。
 
@@ -81,7 +81,7 @@ docker compose up -d
 ```bash
 ./update.sh            # 更新到最新 + 重建容器（推荐）
 
-也可以在轻聊 App 里一键更新：设置 →「后端更新」→ 一键更新（走 /api/selfupdate，
+也可以在Nori App 里一键更新：设置 →「后端更新」→ 一键更新（走 /api/selfupdate，
 效果等同在 NAS 上跑 ./update.sh；老版本后端没有此接口时 App 会显示手动命令）。
 ./update.sh --check    # 只看有没有新版，不改任何东西
 ./update.sh --version v4.0.13   # 更新到指定 tag（配套某个 App 版本）
@@ -123,7 +123,7 @@ curl http://127.0.0.1:9127/api/version
 
 ## 📖 踩坑记录在哪
 
-完整踩坑实录（sudo/nginx/systemd/后端 patch/鉴权 token/PWA 缓存/ASR 自愈/docker 解析/看门狗）沉淀在 Hermes 技能 `qingliao-webui`（开发/调试/部署轻聊必读）与 NAS `轻聊app/避坑指南.md`（iOS 端）。
+完整踩坑实录（sudo/nginx/systemd/后端 patch/鉴权 token/PWA 缓存/ASR 自愈/docker 解析/看门狗）沉淀在 Hermes 技能 `qingliao-webui`（开发/调试/部署Nori 必读）与 NAS `轻聊app/避坑指南.md`（iOS 端）。
 
 ## ⚙️ 环境变量
 
