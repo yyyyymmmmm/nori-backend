@@ -2802,6 +2802,27 @@ class StreamHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send(500, {"ok": False, "error": "保存失败: %s" % e})
 
+        # v4.4.x：NAS 存储路径配置
+        if self.path == "/api/connections/nas":
+            nas_path = str(data.get("path", "") or "").strip()
+            if not nas_path:
+                return self._send(400, {"ok": False, "error": "路径必填"})
+            try:
+                import os as _os
+                # 保存到环境变量文件（持久化）
+                # 简单起见，写入 QL_DATA_DIR/nas_config.json
+                import json as _json
+                cfg_file = _os.path.join(
+                    _os.environ.get("QL_DATA_DIR", "/app/data"), "nas_config.json")
+                _os.makedirs(_os.path.dirname(cfg_file), exist_ok=True)
+                with open(cfg_file, "w", encoding="utf-8") as f:
+                    _json.dump({"path": nas_path}, f, ensure_ascii=False)
+                # 同时设置环境变量（当前进程生效）
+                _os.environ["QL_NAS_PATH"] = nas_path
+                return self._send(200, {"ok": True, "configured": True})
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": "保存失败: %s" % e})
+
         # v4.4.x：连接中心——测试 Home Assistant 连通性
         # body 可带 {base_url, token} 测未保存的值；不带则用已保存的
         if self.path == "/api/connections/homeassistant/test":
@@ -3027,6 +3048,32 @@ class StreamHandler(BaseHTTPRequestHandler):
                 "url": ha_url, "editable": True,
                 "fields": ["base_url", "token"],
                 "note": "填地址和长期访问令牌，AI 可控制智能家居",
+            })
+            # NAS 存储：文件上传位置等（v4.4.x 新增）
+            nas_configured, nas_path = False, ""
+            try:
+                import os as _os
+                import json as _json
+                # 先读配置文件，再读环境变量
+                cfg_file = _os.path.join(
+                    _os.environ.get("QL_DATA_DIR", "/app/data"), "nas_config.json")
+                if _os.path.exists(cfg_file):
+                    with open(cfg_file, encoding="utf-8") as f:
+                        d = _json.load(f)
+                        nas_path = str(d.get("path", "") or "")
+                        nas_configured = bool(nas_path)
+                if not nas_configured:
+                    nas_cfg = _os.environ.get("QL_NAS_PATH", "")
+                    if nas_cfg:
+                        nas_configured, nas_path = True, nas_cfg
+            except Exception:
+                pass
+            conns.append({
+                "id": "nas", "name": "NAS 存储",
+                "configured": nas_configured,
+                "url": nas_path, "editable": True,
+                "fields": ["path"],
+                "note": "文件上传保存位置",
             })
             return self._send(200, {"ok": True, "connections": conns})
         # v3.4.23 任务中心：进行中任务列表（流式任务 streaming 中 + 登记的后台作业）
