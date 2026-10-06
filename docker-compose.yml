@@ -58,13 +58,18 @@ services:
       STREAM_WEBHOOK_URL: ${STREAM_WEBHOOK_URL:-http://localhost:8644/webhooks/qingliao-push}
       QL_OLLAMA_URL: ${QL_OLLAMA_URL:-http://localhost:11434/v1}
       
-      # === 上游 LLM ===
+      # === 上游 LLM（2026-10-07 整治：QL_HERMES_URL/QL_HERMES_KEY 已废弃，
+      # 唯一配置源是下面的 STREAM_HERMES_URL / STREAM_HERMES_KEY；这两行仅为
+      # 兼容老 .env 保留透传，不再被代码读取）===
       QL_HERMES_URL: ${QL_HERMES_URL:-http://host.docker.internal:9123/v1/chat/completions}
       QL_HERMES_KEY: ${QL_HERMES_KEY:-}
       # === Hermes 上游主链路（stream_api/cron/goal 共用；容器内 127.0.0.1 会打到自己，
       # 必须显式注入。这是服务端内部配置，唯一配置源——App 端不感知不配置，
-      # App 只配一个"服务器地址"指向本后端）===
+      # App 只配一个"服务器地址"指向本后端）。
+      # STREAM_HERMES_KEY = Hermes 容器的 API_SERVER_KEY，二者必须一致，
+      # 否则网关返回 401（面板"智能体服务"异常、发消息不回）===
       STREAM_HERMES_URL: ${STREAM_HERMES_URL:-http://host.docker.internal:9123/v1/chat/completions}
+      STREAM_HERMES_KEY: ${STREAM_HERMES_KEY:-}
       STREAM_HERMES_SESSION: ${STREAM_HERMES_SESSION:-1}
       
       # === Home Assistant ===

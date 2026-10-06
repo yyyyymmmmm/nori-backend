@@ -436,8 +436,8 @@ def _collect_nas_status():
         services["qingliao_mem"] = None
         services["qingliao_docker_mem"] = None
     try:
-        # v2.0.102c：读动态 HERMES_KEY（hermes_upstream：持久化配置 > STREAM_HERMES_KEY；
-        # 原直接读 env，App 改完设置不重启不生效）+
+        # v2.0.102c：读动态 key（hermes_upstream.get_key()：STREAM_HERMES_KEY
+        # 优先，持久化配置兼容；2026-10-07 整治后不再备选 QL_AGENT_KEY）+
         #           健康检查打 /health（原打 /v1/chat/completions 是 POST 端点，GET 恒 405 → 永远误判离线）
         hkey = hermes_upstream.get_key()  # 2026-10-07：裸 HERMES_KEY 在函数内 NameError（PEP 562 不管用），直接调
         health_url = os.environ.get("STREAM_HERMES_HEALTH_URL", "") or hermes_upstream.health_url()

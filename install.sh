@@ -45,11 +45,24 @@ done
 _repo_dir="$(cd "$(dirname "$0")" && pwd)"
 grep -q "^QL_REPO_DIR=" .env || echo "QL_REPO_DIR=${_repo_dir}" >> .env
 
-read -r -p "上游 LLM 端点（OpenAI 兼容，回车=host.docker.internal:9123）: " LLM
+read -r -p "Hermes 网关地址（OpenAI 兼容，回车=host.docker.internal:9123）: " LLM
 if [ -n "$LLM" ]; then
-    grep -q "^QL_HERMES_URL=" .env || echo "QL_HERMES_URL=${LLM}" >> .env
-    read -r -p "上游 LLM API Key（可空）: " KEY
-    grep -q "^QL_HERMES_KEY=" .env || echo "QL_HERMES_KEY=${KEY}" >> .env
+    grep -q "^STREAM_HERMES_URL=" .env || echo "STREAM_HERMES_URL=${LLM}" >> .env
+    read -r -p "Hermes 网关 API Key（= 容器的 API_SERVER_KEY，可空）: " KEY
+    grep -q "^STREAM_HERMES_KEY=" .env || echo "STREAM_HERMES_KEY=${KEY}" >> .env
+fi
+
+# 2026-10-07 整治：历史遗留变量迁移（QL_HERMES_URL/QL_HERMES_KEY 已废弃，
+# 代码不再读取；如 .env 里有值且新变量为空则搬过去，避免用户配的 key 丢失）
+if grep -q "^QL_HERMES_URL=" .env && ! grep -q "^STREAM_HERMES_URL=" .env; then
+    _old_url="$(grep "^QL_HERMES_URL=" .env | cut -d= -f2-)"
+    echo "STREAM_HERMES_URL=${_old_url}" >> .env
+    echo "→ 已迁移 QL_HERMES_URL → STREAM_HERMES_URL"
+fi
+if grep -q "^QL_HERMES_KEY=" .env && ! grep -q "^STREAM_HERMES_KEY=" .env; then
+    _old_key="$(grep "^QL_HERMES_KEY=" .env | cut -d= -f2-)"
+    echo "STREAM_HERMES_KEY=${_old_key}" >> .env
+    echo "→ 已迁移 QL_HERMES_KEY → STREAM_HERMES_KEY（Hermes 网关 key 请确认与容器 API_SERVER_KEY 一致）"
 fi
 
 # Hermes 上游主链路（stream_api/cron/goal 共用；不注入则容器内 127.0.0.1:9123

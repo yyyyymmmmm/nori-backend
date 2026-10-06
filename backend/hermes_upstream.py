@@ -14,8 +14,13 @@ App 端不感知、不配置——App 只配一个"服务器地址"（本后端�
 取值优先级：
   URL：STREAM_HERMES_URL（去掉 /v1/chat/completions 等已知后缀取基地址）
        → 持久化 url → http://127.0.0.1:9123
-  Key：STREAM_HERMES_KEY → QL_AGENT_KEY → 持久化 key（"key" 字段存在即采用，
-       空字符串 = 免鉴权）→ ""
+  Key：STREAM_HERMES_KEY（= Hermes 容器的 API_SERVER_KEY，二者必须一致）
+       → 持久化 key（"key" 字段存在即采用，空字符串 = 免鉴权）→ ""
+
+  注意：QL_AGENT_KEY 是 DeepSeek 直连（方案B）的 key，与 Hermes 网关 key
+  是两回事，绝不能混用（2026-10-07 已从 get_key 备选链删除）。
+  另：QL_HERMES_KEY / QL_HERMES_URL 是 install.sh 历史遗留写法，已废弃，
+  install.sh 现直接写 STREAM_HERMES_URL / STREAM_HERMES_KEY。
 
 只依赖标准库。
 """
@@ -88,7 +93,10 @@ def get_base_url():
 
 
 def get_key():
-    k = os.environ.get("STREAM_HERMES_KEY", "") or os.environ.get("QL_AGENT_KEY", "")
+    # 2026-10-07 整治：只认 STREAM_HERMES_KEY（= Hermes 容器的 API_SERVER_KEY）。
+    # 删掉了 QL_AGENT_KEY 备选——那是 DeepSeek 直连（方案B）的 key，拿它当
+    # Hermes 网关 Bearer 必 401，此备选有害无益。
+    k = os.environ.get("STREAM_HERMES_KEY", "")
     if k:
         return k
     p = _load_persisted()
