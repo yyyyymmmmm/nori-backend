@@ -62,7 +62,8 @@ services:
       QL_HERMES_URL: ${QL_HERMES_URL:-http://host.docker.internal:9123/v1/chat/completions}
       QL_HERMES_KEY: ${QL_HERMES_KEY:-}
       # === Hermes 上游主链路（stream_api/cron/goal 共用；容器内 127.0.0.1 会打到自己，
-      # 必须显式注入；App 设置页（/api/hermes/upstream）可再覆盖，无需重启）===
+      # 必须显式注入。这是服务端内部配置，唯一配置源——App 端不感知不配置，
+      # App 只配一个"服务器地址"指向本后端）===
       STREAM_HERMES_URL: ${STREAM_HERMES_URL:-http://host.docker.internal:9123/v1/chat/completions}
       STREAM_HERMES_SESSION: ${STREAM_HERMES_SESSION:-1}
       

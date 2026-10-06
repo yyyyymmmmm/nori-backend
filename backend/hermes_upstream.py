@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Hermes 上游（upstream）统一解析：持久化配置 > 环境变量 > 默认值。
+"""Hermes 上游（upstream）统一解析：环境变量 > 持久化配置 > 默认值。
 
-App 设置页（POST /api/hermes/upstream）写入的配置落盘于
-{STREAM_DATA_DIR}/hermes_upstream.json；各模块（stream_api / cron_api /
-goal_module / goals_api）一律经本模块函数取值——动态读取，App 改完
-设置即时生效，无需重启容器。
+Hermes 地址是服务端内部配置（docker-compose 的 STREAM_HERMES_URL），
+App 端不感知、不配置——App 只配一个"服务器地址"（本后端），"后台对接 Hermes"
+是本后端内部的事（大厂标准：App 永远只面对一个 API 面）。
+
+{STREAM_DATA_DIR}/hermes_upstream.json 是老版本 App（POST /api/hermes/upstream）
+写入的遗留，仅做向后兼容；环境变量一旦设置，恒优先。
+
+各模块（stream_api / cron_api / goal_module / goals_api）一律经本模块函数取值。
 
 取值优先级：
-  URL：持久化 url → STREAM_HERMES_URL（去掉 /v1/chat/completions 等已知后缀取基地址）
-       → http://127.0.0.1:9123
-  Key：持久化 key（"key" 字段存在即采用，空字符串 = 免鉴权）
-       → STREAM_HERMES_KEY → QL_AGENT_KEY → ""
+  URL：STREAM_HERMES_URL（去掉 /v1/chat/completions 等已知后缀取基地址）
+       → 持久化 url → http://127.0.0.1:9123
+  Key：STREAM_HERMES_KEY → QL_AGENT_KEY → 持久化 key（"key" 字段存在即采用，
+       空字符串 = 免鉴权）→ ""
 
 只依赖标准库。
 """
@@ -71,21 +75,26 @@ def _strip_known_suffixes(u):
 
 
 def get_base_url():
+    # 服务端内部配置优先（docker-compose 的 STREAM_HERMES_URL）；
+    # 持久化文件仅兼容老版本 App 写入，不再是主配置源。
+    u = _normalize_url(os.environ.get("STREAM_HERMES_URL", ""))
+    if u:
+        return _strip_known_suffixes(u)
     p = _load_persisted()
     u = _normalize_url(p.get("url", ""))
     if u:
         return u
-    u = _normalize_url(os.environ.get("STREAM_HERMES_URL", ""))
-    if u:
-        return _strip_known_suffixes(u)
     return DEFAULT_BASE_URL
 
 
 def get_key():
+    k = os.environ.get("STREAM_HERMES_KEY", "") or os.environ.get("QL_AGENT_KEY", "")
+    if k:
+        return k
     p = _load_persisted()
     if "key" in p:
         return p.get("key") or ""
-    return os.environ.get("STREAM_HERMES_KEY", "") or os.environ.get("QL_AGENT_KEY", "") or ""
+    return ""
 
 
 def chat_completions_url():
