@@ -195,13 +195,41 @@ def get_hermes_config():
 
 
 def get_hermes_models():
-    """从 Hermes 配置提取模型列表。返回 [{id, name, provider}]。"""
+    """从 Hermes 配置提取模型列表。返回 [{id, name, provider}]。
+    2026-10-07 用户实测：自定义服务商在顶层 custom_providers，当前模型 gpt-5.6-terra，
+    服务商 custom:老狗。"""
     ok, cfg = get_hermes_config()
     if not ok:
         return False, []
     models = []
     if isinstance(cfg, dict):
-        # Hermes 配置格式：models 或 providers 段
+        # 1. custom_providers：自定义服务商（用户实测结构）
+        cp = cfg.get("custom_providers")
+        if isinstance(cp, dict):
+            for pname, pinfo in cp.items():
+                if isinstance(pinfo, dict):
+                    pmodels = pinfo.get("models") or pinfo.get("model_list") or []
+                    if isinstance(pmodels, dict):
+                        pmodels = list(pmodels.keys())
+                    if isinstance(pmodels, list):
+                        for m in pmodels:
+                            mid = m if isinstance(m, str) else str(m.get("id", m))
+                            models.append({
+                                "id": str(mid),
+                                "name": str(mid),
+                                "provider": str(pname),
+                            })
+                    # 服务商本身也可能直接列模型
+                    if not pmodels and pinfo.get("model"):
+                        models.append({
+                            "id": str(pinfo["model"]),
+                            "name": str(pinfo["model"]),
+                            "provider": str(pname),
+                        })
+                elif isinstance(pinfo, list):
+                    for m in pinfo:
+                        models.append({"id": str(m), "name": str(m), "provider": str(pname)})
+        # 2. models / providers（标准结构）
         for key in ("models", "providers"):
             section = cfg.get(key)
             if isinstance(section, dict):
@@ -224,6 +252,19 @@ def get_hermes_models():
                         })
                     elif isinstance(item, str):
                         models.append({"id": item, "name": item, "provider": "hermes"})
+        # 3. 当前选中的模型（default_model / model / current_model）
+        current = cfg.get("default_model") or cfg.get("model") or cfg.get("current_model")
+        if current and isinstance(current, str):
+            if not any(m["id"] == current for m in models):
+                # 从 custom_providers 找它属于哪个服务商
+                prov = "hermes"
+                if isinstance(cp, dict):
+                    for pname in cp:
+                        if current.startswith(str(pname).split(":")[-1]) or pname in current:
+                            prov = str(pname)
+                            break
+                models.append({"id": current, "name": current, "provider": prov,
+                               "selected": True})
     return True, models
 
 
