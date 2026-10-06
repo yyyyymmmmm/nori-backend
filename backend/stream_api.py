@@ -1977,37 +1977,6 @@ def _build_hermes_messages(st, last_user, is_agent):
     return [{"role": "system", "content": sys_content}] + sanitized
 
 
-def _forward_qingliao(task_id, task, text):
-    """v3.4.7x 方案C-改造：把轻聊消息转发给 Hermes qingliao(9130) 一等客户端通道。
-    Hermes 全权处理（智能判断+工具执行），结果经 qingliao send() 推轻聊收件箱。"""
-    try:
-        import threading
-        st = task["state"]
-        chat_id = str(st.get("sessionId") or task_id)
-        token = os.environ.get("QL_HERMES_TOKEN", "qingliao-token-9130")
-        url = os.environ.get("QL_HERMES_URL", "http://172.21.0.2:9130/chat")
-        body = json.dumps({
-            "text": str(text or ""),
-            "user_id": chat_id,
-            "chat_id": chat_id,
-        }, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(url, data=body, method="POST", headers={
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + token,
-        })
-        threading.Thread(target=_do_qingliao_post, args=(req,), daemon=True).start()
-    except Exception:
-        pass
-
-
-def _do_qingliao_post(req):
-    try:
-        urllib.request.urlopen(req, timeout=15).read()
-    except Exception:
-        pass
-
-
-
 def _worker(task_id, task):
     st = task["state"]
     last_write = time.time()
@@ -2815,6 +2784,58 @@ class StreamHandler(BaseHTTPRequestHandler):
             )
             return self._send(200, {"ok": True, "action": action, "service": svc})
 
+        # v4.4.x：连接中心——保存 Home Assistant 配置（复用 hermes_platforms 机制，
+        # 写 platforms.homeassistant 段：base_url + token）
+        if self.path == "/api/connections/homeassistant":
+            base_url = str(data.get("base_url", "") or "").strip().rstrip("/")
+            token = str(data.get("token", "") or "").strip()
+            if not base_url or not token:
+                return self._send(400, {"ok": False, "error": "地址和令牌都必填"})
+            try:
+                import hermes_platforms as _hp
+                ok, err, _ = _hp.set_platform(
+                    "homeassistant", True,
+                    {"base_url": base_url, "token": token})
+                if not ok:
+                    return self._send(500, {"ok": False, "error": err})
+                return self._send(200, {"ok": True, "configured": True})
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": "保存失败: %s" % e})
+
+        # v4.4.x：连接中心——测试 Home Assistant 连通性
+        # body 可带 {base_url, token} 测未保存的值；不带则用已保存的
+        if self.path == "/api/connections/homeassistant/test":
+            base_url = str(data.get("base_url", "") or "").strip().rstrip("/")
+            token = str(data.get("token", "") or "").strip()
+            if not (base_url and token):
+                try:
+                    import hermes_platforms as _hp
+                    raw = _hp._read_raw().get("homeassistant", {})
+                    base_url = base_url or str(raw.get("base_url", "") or "").rstrip("/")
+                    token = token or str(raw.get("token", "") or "")
+                except Exception:
+                    pass
+            if not (base_url and token):
+                return self._send(400, {"ok": False, "error": "未配置地址和令牌"})
+            try:
+                req = urllib.request.Request(
+                    base_url + "/api/",
+                    headers={"Authorization": "Bearer " + token,
+                             "Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    body = resp.read().decode("utf-8", "replace")
+                    info = json.loads(body) if body.strip() else {}
+                return self._send(200, {"ok": True,
+                                        "version": str(info.get("version", ""))})
+            except urllib.error.HTTPError as e:
+                if e.code == 401:
+                    return self._send(200, {"ok": False, "error": "令牌无效（401）"})
+                return self._send(200, {"ok": False,
+                                        "error": "HA 返回 %s" % e.code})
+            except Exception as e:
+                return self._send(200, {"ok": False,
+                                        "error": "连不上：%s" % str(e)[:120]})
+
         # v4.4.x：保存 TTS 厂商 api_key（App 朗读设置页写这个）——写入 config.yaml 的
         # providers.<provider>.api_key，原子替换 + 0o600 权限。只接受 xiaomi/zai/stepfun。
         if self.path == "/api/tts/key":
@@ -2971,6 +2992,43 @@ class StreamHandler(BaseHTTPRequestHandler):
             key = _load_cfg_key(["providers", provider, "api_key"])
             return self._send(200, {"ok": True, "provider": provider,
                                    "configured": bool(key)})
+        # v4.4.x：连接中心——各服务配置状态（App「连接设置」页读这个；密钥永不回传）
+        if self.path.split("?", 1)[0] == "/api/connections":
+            conns = []
+            # Hermes 服务：后端自身的上游（ENV 配置），只读状态
+            try:
+                import hermes_upstream as _hu
+                hu_url = _hu.get_base_url()
+                hu_key = _hu.get_key()
+            except Exception:
+                hu_url, hu_key = "", ""
+            conns.append({
+                "id": "hermes", "name": "Hermes 服务",
+                "configured": bool(hu_url and hu_key),
+                "url": hu_url, "editable": False,
+                "note": "服务端内部配置",
+            })
+            # Home Assistant：复用 hermes_platforms 的 platforms.homeassistant 段
+            ha_configured, ha_url = False, ""
+            try:
+                import hermes_platforms as _hp
+                for p in _hp.get_platforms():
+                    if p.get("id") == "homeassistant":
+                        ha_configured = bool(p.get("configured"))
+                        break
+                # 读 base_url（不含 token）
+                raw = _hp._read_raw().get("homeassistant", {})
+                ha_url = str(raw.get("base_url", "") or "")
+            except Exception:
+                pass
+            conns.append({
+                "id": "homeassistant", "name": "Home Assistant",
+                "configured": ha_configured,
+                "url": ha_url, "editable": True,
+                "fields": ["base_url", "token"],
+                "note": "填地址和长期访问令牌，AI 可控制智能家居",
+            })
+            return self._send(200, {"ok": True, "connections": conns})
         # v3.4.23 任务中心：进行中任务列表（流式任务 streaming 中 + 登记的后台作业）
         if self.path.startswith("/api/tasks/active") or self.path.startswith("/api/agent/tasks/active"):
             return self._send(200, _collect_active_tasks())
