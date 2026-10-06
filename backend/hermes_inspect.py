@@ -196,75 +196,99 @@ def get_hermes_config():
 
 def get_hermes_models():
     """从 Hermes 配置提取模型列表。返回 [{id, name, provider}]。
-    2026-10-07 用户实测：自定义服务商在顶层 custom_providers，当前模型 gpt-5.6-terra，
-    服务商 custom:老狗。"""
+    2026-10-07 用户实测（c1e88aa）：
+    - model 是对象：{default: ..., provider: ...}
+    - custom_providers 是数组，含 2 个条目
+    - 当前选择：custom:老狗 / gpt-5.6-terra"""
     ok, cfg = get_hermes_config()
     if not ok:
         return False, []
     models = []
-    if isinstance(cfg, dict):
-        # 1. custom_providers：自定义服务商（用户实测结构）
-        cp = cfg.get("custom_providers")
-        if isinstance(cp, dict):
-            for pname, pinfo in cp.items():
-                if isinstance(pinfo, dict):
-                    pmodels = pinfo.get("models") or pinfo.get("model_list") or []
-                    if isinstance(pmodels, dict):
-                        pmodels = list(pmodels.keys())
-                    if isinstance(pmodels, list):
-                        for m in pmodels:
-                            mid = m if isinstance(m, str) else str(m.get("id", m))
-                            models.append({
-                                "id": str(mid),
-                                "name": str(mid),
-                                "provider": str(pname),
-                            })
-                    # 服务商本身也可能直接列模型
-                    if not pmodels and pinfo.get("model"):
-                        models.append({
-                            "id": str(pinfo["model"]),
-                            "name": str(pinfo["model"]),
-                            "provider": str(pname),
-                        })
-                elif isinstance(pinfo, list):
-                    for m in pinfo:
-                        models.append({"id": str(m), "name": str(m), "provider": str(pname)})
-        # 2. models / providers（标准结构）
-        for key in ("models", "providers"):
-            section = cfg.get(key)
-            if isinstance(section, dict):
-                for mid, info in section.items():
-                    if isinstance(info, dict):
-                        models.append({
-                            "id": str(mid),
-                            "name": str(info.get("name") or info.get("label") or mid),
-                            "provider": str(info.get("provider") or "hermes"),
-                        })
-                    elif isinstance(info, str):
-                        models.append({"id": str(mid), "name": info, "provider": "hermes"})
-            elif isinstance(section, list):
-                for item in section:
-                    if isinstance(item, dict) and item.get("id"):
-                        models.append({
-                            "id": str(item["id"]),
-                            "name": str(item.get("name") or item["id"]),
-                            "provider": str(item.get("provider") or "hermes"),
-                        })
-                    elif isinstance(item, str):
-                        models.append({"id": item, "name": item, "provider": "hermes"})
-        # 3. 当前选中的模型（default_model / model / current_model）
-        current = cfg.get("default_model") or cfg.get("model") or cfg.get("current_model")
-        if current and isinstance(current, str):
-            if not any(m["id"] == current for m in models):
-                # 从 custom_providers 找它属于哪个服务商
-                prov = "hermes"
-                if isinstance(cp, dict):
-                    for pname in cp:
-                        if current.startswith(str(pname).split(":")[-1]) or pname in current:
-                            prov = str(pname)
-                            break
-                models.append({"id": current, "name": current, "provider": prov,
-                               "selected": True})
+    if not isinstance(cfg, dict):
+        return True, []
+    # 1. custom_providers：数组（用户实测结构）
+    cp = cfg.get("custom_providers")
+    cp_list = []
+    if isinstance(cp, list):
+        cp_list = cp
+    elif isinstance(cp, dict):
+        # 兼容字典格式
+        cp_list = [{"name": k, **(v if isinstance(v, dict) else {})}
+                   for k, v in cp.items()]
+    for pinfo in cp_list:
+        if not isinstance(pinfo, dict):
+            continue
+        pname = str(pinfo.get("name") or pinfo.get("id") or pinfo.get("provider") or "custom")
+        # 模型列表字段：models / model_list / model（单个）
+        pmodels = pinfo.get("models") or pinfo.get("model_list") or []
+        if isinstance(pmodels, dict):
+            pmodels = list(pmodels.keys())
+        if isinstance(pmodels, list):
+            for m in pmodels:
+                if isinstance(m, dict):
+                    mid = str(m.get("id") or m.get("name") or m)
+                    mname = str(m.get("name") or mid)
+                else:
+                    mid = mname = str(m)
+                models.append({"id": mid, "name": mname, "provider": pname})
+        # 单个 model 字段
+        single = pinfo.get("model")
+        if single and isinstance(single, str):
+            if not any(x["id"] == single for x in models):
+                models.append({"id": single, "name": single, "provider": pname})
+    # 2. models / providers（标准结构，兼容）
+    for key in ("models", "providers"):
+        section = cfg.get(key)
+        if isinstance(section, dict):
+            for mid, info in section.items():
+                if isinstance(info, dict):
+                    models.append({
+                        "id": str(mid),
+                        "name": str(info.get("name") or info.get("label") or mid),
+                        "provider": str(info.get("provider") or "hermes"),
+                    })
+                elif isinstance(info, str):
+                    models.append({"id": str(mid), "name": info, "provider": "hermes"})
+        elif isinstance(section, list):
+            for item in section:
+                if isinstance(item, dict) and item.get("id"):
+                    models.append({
+                        "id": str(item["id"]),
+                        "name": str(item.get("name") or item["id"]),
+                        "provider": str(item.get("provider") or "hermes"),
+                    })
+                elif isinstance(item, str):
+                    models.append({"id": item, "name": item, "provider": "hermes"})
+    # 3. 当前选中的模型：model 是对象 {default, provider}
+    mobj = cfg.get("model")
+    current_id, current_prov = None, None
+    if isinstance(mobj, dict):
+        current_id = mobj.get("default") or mobj.get("id") or mobj.get("name")
+        current_prov = mobj.get("provider")
+    elif isinstance(mobj, str):
+        current_id = mobj
+    # 兼容顶层 default_model / current_model 字符串
+    if not current_id:
+        for k in ("default_model", "current_model"):
+            v = cfg.get(k)
+            if isinstance(v, str) and v:
+                current_id = v
+                break
+    if current_id:
+        current_id = str(current_id)
+        # 标记已有的为 selected
+        found = False
+        for m in models:
+            if m["id"] == current_id:
+                m["selected"] = True
+                found = True
+        if not found:
+            models.append({
+                "id": current_id,
+                "name": current_id,
+                "provider": str(current_prov) if current_prov else "hermes",
+                "selected": True,
+            })
     return True, models
 
 
