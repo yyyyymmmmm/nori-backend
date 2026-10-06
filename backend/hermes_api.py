@@ -100,6 +100,15 @@ class Handler(BaseHTTPRequestHandler):
     def _is_models_hide(self, path):
         return path.endswith("/hermes/models/hide")
 
+    def _is_inspect_probe(self, path):
+        return path.endswith("/hermes/inspect/probe")
+
+    def _is_inspect_memory(self, path):
+        return path.endswith("/hermes/inspect/memory")
+
+    def _is_inspect_config(self, path):
+        return path.endswith("/hermes/inspect/config")
+
     def _is_providers(self, path):
         return path.endswith("/hermes/providers")
 
@@ -173,6 +182,40 @@ class Handler(BaseHTTPRequestHandler):
                 "url": hermes_upstream.get_base_url(),
                 "has_key": bool(key),
             })
+            return
+        # v4.4.x：经 docker socket 读 Hermes 容器（完整同步：模型/服务商/记忆/技能）
+        if self._is_inspect_probe(path):
+            import hermes_inspect
+            self._send(200, hermes_inspect.probe())
+            return
+        if self._is_inspect_memory(path):
+            import hermes_inspect
+            mem = {}
+            for label, p in [("MEMORY.md", "/app/memories/MEMORY.md"),
+                             ("USER.md", "/app/memories/USER.md")]:
+                ok, content = hermes_inspect.read_hermes_file(p)
+                if ok:
+                    mem[label] = content
+                else:
+                    # 试 probe 找到的实际路径
+                    import hermes_inspect as _hi
+                    probe = _hi.probe()
+                    alt = probe.get("files", {}).get(label)
+                    if alt and alt is not True:
+                        ok2, c2 = _hi.read_hermes_file(alt)
+                        if ok2:
+                            mem[label] = c2
+            self._send(200, {"memory": mem})
+            return
+        if self._is_inspect_config(path):
+            import hermes_inspect
+            ok, content = hermes_inspect.read_hermes_file("/app/config.yaml")
+            if not ok:
+                ok, content = hermes_inspect.read_hermes_file("/app/config.yml")
+            # 不返回完整 config（可能含密钥），只返回结构摘要
+            self._send(200, {"ok": ok,
+                             "has_config": ok,
+                             "size": len(content) if ok else 0})
             return
         if self._is_models(path):
             sel = hermes_upstream.get_selected()
