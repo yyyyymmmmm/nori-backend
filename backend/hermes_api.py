@@ -204,13 +204,24 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._is_inspect_config(path):
             import hermes_inspect
-            ok, content = hermes_inspect.read_hermes_file("/home/agent/.hermes/config.yaml")
-            if not ok:
-                ok, content = hermes_inspect.read_hermes_file("/app/config.yaml")
-            # 不返回完整 config（可能含密钥），只返回结构摘要
-            self._send(200, {"ok": ok,
-                             "has_config": ok,
-                             "size": len(content) if ok else 0})
+            ok, cfg = hermes_inspect.get_hermes_config()
+            # 不返回完整 config（可能含密钥），只返回顶层结构摘要
+            summary = {}
+            if ok and isinstance(cfg, dict):
+                for k, v in cfg.items():
+                    if isinstance(v, dict):
+                        summary[k] = {"type": "dict", "keys": list(v.keys())[:20]}
+                    elif isinstance(v, list):
+                        summary[k] = {"type": "list", "count": len(v)}
+                    else:
+                        s = str(v)
+                        # 脱敏：可能是 key/token 的值不返回原文
+                        if any(w in k.lower() for w in ("key", "token", "secret", "password")):
+                            s = "***" if s else ""
+                        elif len(s) > 80:
+                            s = s[:80] + "…"
+                        summary[k] = s
+            self._send(200, {"ok": ok, "structure": summary})
             return
         if self._is_inspect_hermes_models(path):
             import hermes_inspect
