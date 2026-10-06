@@ -73,10 +73,10 @@ class Handler(BaseHTTPRequestHandler):
 
     # ── hermes job 转发 ────────────────────────────────────
     def _hermes(self, method, path, payload=None, timeout=12):
-        url = f"{HERMES_API}{path}"
+        url = f"{hermes_upstream.get_base_url()}{path}"
         data = json.dumps(payload).encode('utf-8') if payload is not None else None
         req = urllib.request.Request(url, data=data, headers={
-            'Authorization': f'Bearer {HERMES_KEY}',
+            'Authorization': f'Bearer {hermes_upstream.get_key()}',
             'Content-Type': 'application/json'
         }, method=method)
         with urllib.request.urlopen(req, timeout=timeout) as resp:

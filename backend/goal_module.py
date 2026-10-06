@@ -98,7 +98,7 @@ def _hermes(method, path, payload=None, timeout=12):
     """跟 hermes 9123 说话（容器内直连，绕开 9127 的 token 门）。"""
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(HERMES_API + path, data=data, headers={
-        "Authorization": "Bearer %s" % HERMES_KEY,
+        "Authorization": "Bearer %s" % hermes_upstream.get_key(),
         "Content-Type": "application/json",
     }, method=method)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -479,7 +479,7 @@ def _agent_chat(prompt, timeout=120):
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         HERMES_API + "/v1/chat/completions", data=data,
-        headers={"Authorization": "Bearer %s" % HERMES_KEY,
+        headers={"Authorization": "Bearer %s" % hermes_upstream.get_key(),
                  "Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = json.loads(resp.read().decode("utf-8", "replace"))

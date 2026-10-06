@@ -46,8 +46,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == '/api/cron/tasks':
             try:
-                req = urllib.request.Request(f"{HERMES_API}/api/jobs?include_disabled=true", headers={
-                    'Authorization': f'Bearer {HERMES_KEY}'
+                req = urllib.request.Request(f"{hermes_upstream.get_base_url()}/api/jobs?include_disabled=true", headers={
+                    'Authorization': f'Bearer {hermes_upstream.get_key()}'
                 })
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     data = json.loads(resp.read().decode('utf-8'))
@@ -76,8 +76,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json([])
         elif self.path == '/api/cron/logs':
             try:
-                req = urllib.request.Request(f"{HERMES_API}/api/jobs", headers={
-                    'Authorization': f'Bearer {HERMES_KEY}'
+                req = urllib.request.Request(f"{hermes_upstream.get_base_url()}/api/jobs", headers={
+                    'Authorization': f'Bearer {hermes_upstream.get_key()}'
                 })
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     data = json.loads(resp.read().decode('utf-8'))
@@ -137,10 +137,10 @@ class Handler(BaseHTTPRequestHandler):
                     'deliver': deliver
                 }
                 req = urllib.request.Request(
-                    f"{HERMES_API}/api/jobs",
+                    f"{hermes_upstream.get_base_url()}/api/jobs",
                     data=json.dumps(payload).encode('utf-8'),
                     headers={
-                        'Authorization': f'Bearer {HERMES_KEY}',
+                        'Authorization': f'Bearer {hermes_upstream.get_key()}',
                         'Content-Type': 'application/json'
                     },
                     method='POST'
@@ -154,8 +154,8 @@ class Handler(BaseHTTPRequestHandler):
             task_id = self.path.split('/')[-2]
             try:
                 req = urllib.request.Request(
-                    f"{HERMES_API}/api/jobs/{task_id}/run",
-                    headers={'Authorization': f'Bearer {HERMES_KEY}'},
+                    f"{hermes_upstream.get_base_url()}/api/jobs/{task_id}/run",
+                    headers={'Authorization': f'Bearer {hermes_upstream.get_key()}'},
                     method='POST'
                 )
                 with urllib.request.urlopen(req, timeout=10) as resp:
@@ -195,10 +195,10 @@ class Handler(BaseHTTPRequestHandler):
                     if d in ('origin', 'weixin', 'local', 'all'):
                         payload['deliver'] = d
                 req = urllib.request.Request(
-                    f"{HERMES_API}/api/jobs/{task_id}",
+                    f"{hermes_upstream.get_base_url()}/api/jobs/{task_id}",
                     data=json.dumps(payload).encode('utf-8'),
                     headers={
-                        'Authorization': f'Bearer {HERMES_KEY}',
+                        'Authorization': f'Bearer {hermes_upstream.get_key()}',
                         'Content-Type': 'application/json'
                     },
                     method='PATCH'
@@ -219,8 +219,8 @@ class Handler(BaseHTTPRequestHandler):
             task_id = self.path.split('/')[-1]
             try:
                 req = urllib.request.Request(
-                    f"{HERMES_API}/api/jobs/{task_id}",
-                    headers={'Authorization': f'Bearer {HERMES_KEY}'},
+                    f"{hermes_upstream.get_base_url()}/api/jobs/{task_id}",
+                    headers={'Authorization': f'Bearer {hermes_upstream.get_key()}'},
                     method='DELETE'
                 )
                 with urllib.request.urlopen(req, timeout=10) as resp:
