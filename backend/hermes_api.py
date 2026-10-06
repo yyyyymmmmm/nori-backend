@@ -348,10 +348,15 @@ class Handler(BaseHTTPRequestHandler):
         if self._is_model(path):
             mid = str(body.get("model_id", "") or "")
             pid = str(body.get("provider", "") or "")
-            ok, err = hermes_upstream.save_selected_model(mid, pid or None)
+            # 2026-10-07：切换必须写 Hermes 配置（之前只写后端自己的配置，两边脱节）
+            import hermes_inspect
+            ok, msg = hermes_inspect.set_hermes_model(mid, pid or None)
             if not ok:
-                self._send(200, {"ok": False, "error": err})
+                self._send(200, {"ok": False, "error": "切换 Hermes 模型失败: %s" % msg})
                 return
+            # 同时更新后端上游配置（保持兼容）
+            ok2, err = hermes_upstream.save_selected_model(mid, pid or None)
+            # 后端配置失败不阻断（Hermes 配置已生效）
             self._send(200, {"ok": True})
             return
         if self._is_models_hide(path):

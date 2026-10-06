@@ -321,3 +321,36 @@ def append_hermes_memory(text):
     cmd = "mkdir -p /home/agent/.hermes/memories && echo '%s' | base64 -d >> '%s'" % (b64, path)
     ok, out = exec_in_hermes(cmd)
     return ok, out if not ok else "ok"
+
+
+def set_hermes_model(model_id, provider=None):
+    """切换 Hermes 配置中的模型。返回 (ok, msg)。
+    2026-10-07：修复模型切换只写后端不写 Hermes 的问题。"""
+    import base64
+    # 用 Python 在容器内改 YAML（避免 sed 转义问题）
+    script = '''
+import yaml, sys
+p = "/home/agent/.hermes/config.yaml"
+try:
+    d = yaml.safe_load(open(p)) or {}
+except Exception as e:
+    print("read fail: %s" % e); sys.exit(1)
+m = d.get("model")
+if not isinstance(m, dict):
+    m = {}
+    d["model"] = m
+m["default"] = """ + '"""' + model_id.replace('"', '\\"') + '"""' + '''
+if """ + ('"' + (provider or "").replace('"', '\\"') + '"' if provider else 'None') + ''':
+    m["provider"] = """ + ('"' + (provider or "").replace('"', '\\"') + '"' if provider else 'm.get("provider")') + '''
+try:
+    yaml.safe_dump(d, open(p, "w"), allow_unicode=True)
+    print("ok")
+except Exception as e:
+    print("write fail: %s" % e); sys.exit(1)
+'''
+    b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    cmd = "echo '%s' | base64 -d | python3" % b64
+    ok, out = exec_in_hermes(cmd)
+    if not ok or "ok" not in out:
+        return False, out[:200]
+    return True, "ok"
