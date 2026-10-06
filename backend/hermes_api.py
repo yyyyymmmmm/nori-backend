@@ -118,6 +118,9 @@ class Handler(BaseHTTPRequestHandler):
     def _is_suggestions(self, path):
         return path.endswith("/agent/suggestions")
 
+    def _is_feed_prompt(self, path):
+        return path.endswith("/agent/feed/prompt")
+
     def _is_providers(self, path):
         return path.endswith("/hermes/providers")
 
@@ -240,6 +243,23 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             force = (qs.get("force") or [""])[0] == "1"
             self._send(200, ai_content.get_suggestions(force=force))
+            return
+        # v4.4.x：Feed prompt 存后端
+        if self._is_feed_prompt(path):
+            import feed_prefs
+            if self.command == "GET":
+                self._send(200, {"prompt": feed_prefs.get_prompt()})
+            elif self.command == "POST":
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(length).decode("utf-8"))
+                    prompt = str(body.get("prompt", ""))
+                    ok = feed_prefs.set_prompt(prompt)
+                    self._send(200, {"ok": ok, "prompt": prompt})
+                except Exception as e:
+                    self._send(400, {"ok": False, "error": str(e)[:100]})
+            else:
+                self._send(405, {"error": "method not allowed"})
             return
         if self._is_models(path):
             sel = hermes_upstream.get_selected()

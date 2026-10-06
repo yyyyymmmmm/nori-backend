@@ -71,6 +71,8 @@ ROUTE_TABLE = {
     # v4.4.x：AI 内容生成（点子/今日建议）——提示词后端统一管，iOS 只展示
     "/api/agent/ideas":         ("hermes_api", "Handler"),
     "/api/agent/suggestions":   ("hermes_api", "Handler"),
+    # v4.4.x：Feed prompt 存后端
+    "/api/agent/feed/prompt":    ("hermes_api", "Handler"),
     "/api/agent/action-policy": ("hermes_api", "Handler"),
     "/api/agent/artifacts":     ("hermes_api", "Handler"),
     "/api/agent/media":         ("hermes_api", "Handler"),
