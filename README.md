@@ -47,8 +47,8 @@ App 只对接 Hermes 服务的一个 API 面，不感知内部两层。Hermes �
 ## 🚀 快速开始（一键安装）
 
 ```bash
-git clone https://github.com/yyyyymmmmm/qingliao-backend.git
-cd qingliao-backend
+git clone https://github.com/yyyyymmmmm/nori-backend.git
+cd nori-backend
 bash install.sh
 ```
 
@@ -58,8 +58,8 @@ bash install.sh
 <summary>手动部署（不用脚本）</summary>
 
 ```bash
-git clone https://github.com/yyyyymmmmm/qingliao-backend.git
-cd qingliao-backend
+git clone https://github.com/yyyyymmmmm/nori-backend.git
+cd nori-backend
 # 编辑 docker-compose.yml 设置 QL_PASSWORD 等环境变量
 docker compose up -d
 ```
