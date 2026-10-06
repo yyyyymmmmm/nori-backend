@@ -89,12 +89,38 @@ def _tail_log(state, n=LOG_TAIL_LINES):
 def _normalize(state):
     """给 App 的视图：状态 + 当前版本 + 日志尾部。running 僵尸自动纠正。"""
     s = dict(state)
+    # v4.4.x 加固：helper 写的结果文件（backed_up/health_check/rolled_back）
+    task = s.get("task", "")
+    if task:
+        rp = os.path.join(DATA_DIR, f"selfupdate_{task}.result.json")
+        try:
+            with open(rp, encoding="utf-8") as f:
+                r = json.load(f)
+            if isinstance(r, dict):
+                s["backed_up"] = bool(r.get("backed_up"))
+                s["health_check"] = bool(r.get("health_check"))
+                s["rolled_back"] = bool(r.get("rolled_back"))
+                s["backup_tag"] = str(r.get("backup_tag") or "")
+                # 有结果文件 → 流程已结束，按健康检查定最终状态
+                if s.get("status") == "running":
+                    if r.get("health_check"):
+                        s["status"] = "done"
+                    elif r.get("rolled_back"):
+                        s["status"] = "failed"
+                        s["error"] = "更新后健康检查未通过，已自动回滚到 %s" % (
+                            r.get("backup_tag") or "备份")
+                    else:
+                        s["status"] = "failed"
+                        s["error"] = "更新失败（详见日志）"
+                    _save_state({k: v for k, v in s.items() if k != "log_tail"})
+        except Exception:
+            pass
     if s.get("status") == "running":
         started = float(s.get("started_at") or 0)
         if started and time.time() - started > ZOMBIE_SECONDS:
             s["status"] = "failed"
             s["error"] = "更新超时（15 分钟未完成），请到 NAS 上手动执行 ./update.sh 排查"
-            _save_state(s)
+            _save_state({k: v for k, v in s.items() if k != "log_tail"})
     s["log_tail"] = _tail_log(s)
     # 回传本机当前版本（App 比对用）
     try:
@@ -200,10 +226,13 @@ def _run_check():
 def _do_update(task_id):
     state = _load_state()
     state.update({"status": "running", "task": task_id,
-                  "started_at": time.time(), "error": "", "log_path": ""})
+                  "started_at": time.time(), "error": "", "log_path": "",
+                  "backed_up": False, "health_check": False,
+                  "rolled_back": False, "backup_tag": ""})
     _save_state(state)
 
     log_path = os.path.join(DATA_DIR, f"selfupdate_{task_id}.log")
+    result_path = os.path.join(DATA_DIR, f"selfupdate_{task_id}.result.json")
     state["log_path"] = log_path
     _save_state(state)
 
@@ -223,14 +252,79 @@ def _do_update(task_id):
             return
 
         _w(f"[{time.strftime('%F %T')}] 启动 helper 更新（镜像 {HELPER_IMAGE}）")
-        # 一次性 helper：挂仓根 + sock，在容器内跑 update.sh（它内部的 docker compose
-        # 经 sock 操作宿主 daemon，等价于宿主直接跑）。更新会重建 qingliao 容器 →
-        # 本进程被杀 → 状态已落盘，回来后靠状态文件汇报结果。
-        cmd = ("./update.sh 2>&1 || sh ./update.sh 2>&1")
+        # v4.4.x 加固：helper 内编排 备份→更新→健康检查→失败回滚 全流程，
+        # 结果写 result json（挂载 DATA_DIR），App 轮询拿 backed_up/health_check/rolled_back。
+        # 更新会重建 qingliao 容器 → 本进程被杀 → 状态已落盘，回来后靠状态文件+结果文件汇报。
+        helper_script = r"""
+set -u
+REPO=/repo
+DATADIR=/su-data
+TS=$(date +%Y%m%d-%H%M%S)
+TAG="backup-$TS"
+RESULT="$DATADIR/SELFUPDATE_TASK.result.json"
+LOG="$DATADIR/SELFUPDATE_TASK.log"
+log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG"; }
+jbool() { [ "$1" = true ] && echo true || echo false; }
+
+BACKED_UP=false; UPDATE_OK=false; HEALTH_OK=false; ROLLED_BACK=false
+
+cd "$REPO" || { log "FATAL: 仓根不可用"; exit 1; }
+
+# 1) 备份：打 tag（只记代码位置，不碰 data/）
+log "步骤1/4：备份代码（git tag $TAG）…"
+if git tag "$TAG" 2>>"$LOG"; then
+  BACKED_UP=true; log "备份完成：$TAG"
+else
+  log "备份失败（继续更新，失败时无法自动回滚）"
+fi
+
+# 2) 更新
+log "步骤2/4：执行 ./update.sh …"
+if ./update.sh >>"$LOG" 2>&1; then
+  UPDATE_OK=true; log "update.sh 执行完成"
+else
+  log "update.sh 执行失败"
+fi
+
+# 3) 健康检查：等容器回来，轮询 /api/version（9123 为统一入口）
+log "步骤3/4：健康检查（轮询 /api/version，最长 6 分钟）…"
+if [ "$UPDATE_OK" = true ]; then
+  for i in $(seq 1 36); do
+    sleep 10
+    if curl -sf --max-time 5 http://127.0.0.1:9123/api/version >>"$LOG" 2>&1; then
+      HEALTH_OK=true; log "健康检查通过"; break
+    fi
+  done
+  [ "$HEALTH_OK" = true ] || log "健康检查失败（6 分钟未恢复）"
+fi
+
+# 4) 失败回滚
+if [ "$HEALTH_OK" != true ] && [ "$BACKED_UP" = true ]; then
+  log "步骤4/4：回滚到 $TAG …"
+  if git checkout -q "$TAG" 2>>"$LOG" && docker compose up -d --build >>"$LOG" 2>&1; then
+    ROLLED_BACK=true; log "已回滚，等待恢复…"
+    for i in $(seq 1 18); do
+      sleep 10
+      curl -sf --max-time 5 http://127.0.0.1:9123/api/version >>"$LOG" 2>&1 && break
+    done
+  else
+    log "回滚失败！请手动处理：git checkout $TAG && docker compose up -d --build"
+  fi
+fi
+
+# 写结果（App 轮询用）
+cat > "$RESULT" <<EOF
+{"backed_up": $(jbool $BACKED_UP), "health_check": $(jbool $HEALTH_OK), "rolled_back": $(jbool $ROLLED_BACK), "backup_tag": "$TAG", "update_ok": $(jbool $UPDATE_OK)}
+EOF
+log "流程结束：backed_up=$BACKED_UP health_check=$HEALTH_OK rolled_back=$ROLLED_BACK"
+""".replace("SELFUPDATE_TASK", task_id)
         subprocess.Popen(
-            ["docker", "run", "--rm", "-v", f"{REPO_DIR}:/repo",
+            ["docker", "run", "--rm",
+             "-v", f"{REPO_DIR}:/repo",
+             "-v", f"{DATA_DIR}:/su-data",
              "-v", "/var/run/docker.sock:/var/run/docker.sock",
-             "-w", "/repo", HELPER_IMAGE, "sh", "-c", cmd],
+             "-w", "/repo", HELPER_IMAGE,
+             "sh", "-c", helper_script],
             stdout=open(log_path, "a", encoding="utf-8"),
             stderr=subprocess.STDOUT)
         # 不 wait：本进程随时会随容器重建被杀。若 helper 失败而本容器还活着

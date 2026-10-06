@@ -6,9 +6,14 @@
 借 /api/agent 前缀 → lucky 白名单/relay/nginx 三处零改动）：
   GET  /api/hermes/upstream   当前上游地址 + 是否已配 key（key 本身永不返回）
   POST /api/hermes/upstream   {url, key} → 先实测连通再落盘；失败不保存
-  GET  /api/hermes/models     代理 Hermes /v1/models（无结果回退 /api/model/options），60 秒缓存；
-                             每项带 selected 标记当前选中模型
-  POST /api/hermes/model      {model_id} → 校验（须在 Hermes 实时模型列表中）后落盘选中
+  GET  /api/hermes/models     按服务商分组：{providers: [{id, name, models: [{id, name,
+                             selected}], error}]}；单家挂了只标 error；60 秒缓存；已过滤隐藏
+  POST /api/hermes/model      {provider, model_id} → 校验（须在该服务商实时列表中）后落盘
+                              （兼容老 {model_id}，provider 缺省=当前选中）
+  GET  /api/hermes/providers  服务商清单：id/name/has_key/is_default/editable（key 永不返回）
+  POST /api/hermes/providers  {name, url, key} → 先实测连通再落盘
+  DELETE /api/hermes/providers/{id} → 删除用户服务商（default 不许删）
+  POST /api/hermes/models/hide {provider, model_ids: [...]} → 整体替换该服务商隐藏名单
   GET  /api/hermes/platforms  第三方平台清单：id/name/configured/enabled/needs（token 永不返回）
   POST /api/hermes/platforms  {platform, enabled, config} → 校验必填项后写 config.yaml
                              platforms 段并重启 gateway（扫码/配对类平台第一版只读状态）
@@ -92,6 +97,20 @@ class Handler(BaseHTTPRequestHandler):
     def _is_model(self, path):
         return path.endswith("/hermes/model")
 
+    def _is_models_hide(self, path):
+        return path.endswith("/hermes/models/hide")
+
+    def _is_providers(self, path):
+        return path.endswith("/hermes/providers")
+
+    def _is_provider_item(self, path):
+        # DELETE /api/hermes/providers/{id}
+        parts = path.rstrip("/").split("/")
+        return len(parts) >= 2 and parts[-2] == "providers" and parts[-1]
+
+    def _provider_item_id(self, path):
+        return path.rstrip("/").split("/")[-1]
+
     def _is_platforms(self, path):
         return path.endswith("/hermes/platforms")
 
@@ -156,14 +175,19 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
         if self._is_models(path):
-            models, err = hermes_upstream.get_models()
-            if err:
-                self._send(200, {"models": [], "error": err})
-            else:
-                sel = hermes_upstream.get_selected_model()
+            sel = hermes_upstream.get_selected()
+            out = []
+            for grp in hermes_upstream.get_all_models():
+                models = grp["models"]
                 for m in models:
-                    m["selected"] = (m["id"] == sel)
-                self._send(200, {"models": models})
+                    m["selected"] = (m["id"] == sel["model"]
+                                     and grp["id"] == sel["provider"])
+                out.append({"id": grp["id"], "name": grp["name"],
+                            "models": models, "error": grp["error"]})
+            self._send(200, {"providers": out})
+            return
+        if self._is_providers(path):
+            self._send(200, {"providers": hermes_upstream.get_providers()})
             return
         if self._is_platforms(path):
             self._send(200, {"platforms": hermes_platforms.get_platforms()})
@@ -214,11 +238,30 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._is_model(path):
             mid = str(body.get("model_id", "") or "")
-            ok, err = hermes_upstream.save_selected_model(mid)
+            pid = str(body.get("provider", "") or "")
+            ok, err = hermes_upstream.save_selected_model(mid, pid or None)
             if not ok:
                 self._send(200, {"ok": False, "error": err})
                 return
             self._send(200, {"ok": True})
+            return
+        if self._is_models_hide(path):
+            pid = str(body.get("provider", "") or "")
+            ids = body.get("model_ids")
+            ok, err = hermes_upstream.save_hidden_models(
+                pid, ids if isinstance(ids, list) else [])
+            if not ok:
+                self._send(200, {"ok": False, "error": err})
+                return
+            self._send(200, {"ok": True})
+            return
+        if self._is_providers(path):
+            ok, payload = hermes_upstream.add_provider(
+                body.get("name"), body.get("url"), body.get("key"))
+            if not ok:
+                self._send(200, {"ok": False, "error": payload})
+                return
+            self._send(200, {"ok": True, "provider": payload})
             return
         if self._is_platforms(path):
             pid = str(body.get("platform", "") or "")
@@ -302,6 +345,12 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b"{}") if n else {}
         except Exception:  # noqa: BLE001
             body = {}
+        if self._is_provider_item(path):
+            pid = self._provider_item_id(path)
+            ok, err = hermes_upstream.delete_provider(pid)
+            self._send(200, {"ok": True} if ok else
+                       {"ok": False, "error": err})
+            return
         if self._is_artifacts(path):
             if agent_prefs.delete_artifact(body.get("id")):
                 self._send(200, {"ok": True})
