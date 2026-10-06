@@ -219,6 +219,10 @@ def get_hermes_models():
         if not isinstance(pinfo, dict):
             continue
         pname = str(pinfo.get("name") or pinfo.get("id") or pinfo.get("provider") or "custom")
+        # 2026-10-07：custom_providers 的条目统一加 custom: 前缀，与 model.provider 对齐
+        #（用户实测：model.provider = "custom:老狗"，条目 name = "老狗"）
+        if ":" not in pname:
+            pname = "custom:" + pname
         # 模型列表字段：models / model_list / model（单个）
         pmodels = pinfo.get("models") or pinfo.get("model_list") or []
         if isinstance(pmodels, dict):
