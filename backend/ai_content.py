@@ -129,14 +129,18 @@ def get_ideas(force=False):
     return {"ideas": _IDEAS_FALLBACK, "fallback": True}
 
 
-def get_suggestions(force=False):
-    """获取今日建议。"""
+def get_suggestions(force=False, health_context=None):
+    """获取今日建议。health_context: iOS 发来的健康摘要（可选），AI 基于此生成个性化建议。"""
     today = _today()
     c = _SUGGEST_CACHE
-    if not force and c["date"] == today and c["data"]:
+    # 有健康数据时不走缓存（每次都要个性化）
+    if not force and not health_context and c["date"] == today and c["data"]:
         return {"suggestions": c["data"], "fallback": False}
     date_str = time.strftime("%m月%d日 %A")
-    raw = _call_ai(_SUGGEST_PROMPT % (date_str, _time_desc()), timeout=30)
+    prompt = _SUGGEST_PROMPT % (date_str, _time_desc())
+    if health_context:
+        prompt += "\n\n用户的健康数据摘要：\n%s\n请基于以上健康数据，给出个性化的健康建议。" % health_context
+    raw = _call_ai(prompt, timeout=30)
     arr = _parse_json_array(raw)
     valid = []
     if arr:

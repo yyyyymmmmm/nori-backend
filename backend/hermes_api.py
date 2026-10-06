@@ -391,6 +391,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True,
                              "restart": "triggered" if restarted else "failed"})
             return
+        if self._is_suggestions(path):
+            # 2026-10-07：健康 AI 联动 —— 接收 iOS 发来的健康摘要，喂给 Hermes 生成个性化建议
+            import ai_content
+            health = str(body.get("health") or "").strip()[:2000]
+            self._send(200, ai_content.get_suggestions(force=True, health_context=health or None))
+            return
         if self._is_oauth_start(path):
             vid = str(body.get("vendor_id", "") or "")
             host = self.headers.get("Host", "")
