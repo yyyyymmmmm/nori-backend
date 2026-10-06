@@ -112,6 +112,12 @@ class Handler(BaseHTTPRequestHandler):
     def _is_inspect_hermes_models(self, path):
         return path.endswith("/hermes/inspect/models")
 
+    def _is_ideas(self, path):
+        return path.endswith("/agent/ideas")
+
+    def _is_suggestions(self, path):
+        return path.endswith("/agent/suggestions")
+
     def _is_providers(self, path):
         return path.endswith("/hermes/providers")
 
@@ -210,6 +216,19 @@ class Handler(BaseHTTPRequestHandler):
             import hermes_inspect
             ok, models = hermes_inspect.get_hermes_models()
             self._send(200, {"ok": ok, "models": models, "count": len(models)})
+            return
+        # v4.4.x：AI 内容生成（点子/今日建议）——提示词后端统一管，iOS 只展示
+        if self._is_ideas(path):
+            import ai_content
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            force = (qs.get("force") or [""])[0] == "1"
+            self._send(200, ai_content.get_ideas(force=force))
+            return
+        if self._is_suggestions(path):
+            import ai_content
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            force = (qs.get("force") or [""])[0] == "1"
+            self._send(200, ai_content.get_suggestions(force=force))
             return
         if self._is_models(path):
             sel = hermes_upstream.get_selected()

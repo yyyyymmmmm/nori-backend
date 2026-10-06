@@ -68,6 +68,9 @@ ROUTE_TABLE = {
     # Wave 3 收尾：资讯点赞/动作权限/产物沉淀/媒体生成/简报口径（agent_prefs.py；
     # Handler 内按 /agent/* 后缀匹配，借 /api/agent 前缀 → lucky 白名单零改动）
     "/api/agent/brief":         ("hermes_api", "Handler"),
+    # v4.4.x：AI 内容生成（点子/今日建议）——提示词后端统一管，iOS 只展示
+    "/api/agent/ideas":         ("hermes_api", "Handler"),
+    "/api/agent/suggestions":   ("hermes_api", "Handler"),
     "/api/agent/action-policy": ("hermes_api", "Handler"),
     "/api/agent/artifacts":     ("hermes_api", "Handler"),
     "/api/agent/media":         ("hermes_api", "Handler"),
