@@ -121,6 +121,9 @@ class Handler(BaseHTTPRequestHandler):
     def _is_feed_prompt(self, path):
         return path.endswith("/agent/feed/prompt")
 
+    def _is_agent_settings(self, path):
+        return path.endswith("/agent/settings")
+
     def _is_providers(self, path):
         return path.endswith("/hermes/providers")
 
@@ -256,6 +259,25 @@ class Handler(BaseHTTPRequestHandler):
                     prompt = str(body.get("prompt", ""))
                     ok = feed_prefs.set_prompt(prompt)
                     self._send(200, {"ok": ok, "prompt": prompt})
+                except Exception as e:
+                    self._send(400, {"ok": False, "error": str(e)[:100]})
+            else:
+                self._send(405, {"error": "method not allowed"})
+            return
+        # v4.4.x：通用设置存后端（上下文压缩等）
+        if self._is_agent_settings(path):
+            import agent_settings
+            if self.command == "GET":
+                self._send(200, {"settings": agent_settings.get_settings()})
+            elif self.command == "POST":
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(length).decode("utf-8"))
+                    ok = True
+                    for k, v in body.items():
+                        if not agent_settings.set_setting(k, v):
+                            ok = False
+                    self._send(200, {"ok": ok})
                 except Exception as e:
                     self._send(400, {"ok": False, "error": str(e)[:100]})
             else:

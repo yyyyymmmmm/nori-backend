@@ -73,6 +73,8 @@ ROUTE_TABLE = {
     "/api/agent/suggestions":   ("hermes_api", "Handler"),
     # v4.4.x：Feed prompt 存后端
     "/api/agent/feed/prompt":    ("hermes_api", "Handler"),
+    # v4.4.x：通用设置存后端
+    "/api/agent/settings":       ("hermes_api", "Handler"),
     "/api/agent/action-policy": ("hermes_api", "Handler"),
     "/api/agent/artifacts":     ("hermes_api", "Handler"),
     "/api/agent/media":         ("hermes_api", "Handler"),
