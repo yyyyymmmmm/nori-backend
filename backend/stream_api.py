@@ -2815,6 +2815,40 @@ class StreamHandler(BaseHTTPRequestHandler):
             )
             return self._send(200, {"ok": True, "action": action, "service": svc})
 
+        # v4.4.x：保存 TTS 厂商 api_key（App 朗读设置页写这个）——写入 config.yaml 的
+        # providers.<provider>.api_key，原子替换 + 0o600 权限。只接受 xiaomi/zai/stepfun。
+        if self.path == "/api/tts/key":
+            provider = str(data.get("provider", "") or "").strip()
+            api_key = str(data.get("api_key", "") or "").strip()
+            if provider not in ("xiaomi", "zai", "stepfun"):
+                return self._send(400, {"ok": False, "error": "unknown provider"})
+            if not api_key:
+                return self._send(400, {"ok": False, "error": "api_key 必填"})
+            if _yaml is None:
+                return self._send(500, {"ok": False, "error": "yaml 模块不可用"})
+            cfg_path = _hermes_cfg_path()
+            try:
+                with open(cfg_path, encoding="utf-8") as f:
+                    cfg = _yaml.safe_load(f) or {}
+                providers = cfg.get("providers")
+                if not isinstance(providers, dict):
+                    providers = {}
+                    cfg["providers"] = providers
+                entry = providers.get(provider)
+                if not isinstance(entry, dict):
+                    entry = {}
+                    providers[provider] = entry
+                entry["api_key"] = api_key
+                tmp = cfg_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    _yaml.safe_dump(cfg, f, allow_unicode=True, default_flow_style=False)
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, cfg_path)
+                return self._send(200, {"ok": True, "provider": provider,
+                                        "configured": True})
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": "写入配置失败: %s" % e})
+
         # v3.0.68：文本转语音（云端神经 TTS）——按 provider 分发（xiaomi mimo / zai glm-tts）
         # App 把 text 出 POST，后端按 provider+model 调对应厂商，返回 base64 音频
         if self.path == "/api/tts":
@@ -2928,6 +2962,15 @@ class StreamHandler(BaseHTTPRequestHandler):
         if self.path.split("?", 1)[0] == "/api/stream/custom-providers":
             import provider_admin as _pa
             return self._send(200, _pa.custom_list())
+        # v4.4.x：TTS 各厂商 key 是否已配置（App 朗读设置页读这个，只返回布尔，不回传 key）
+        if self.path.split("?", 1)[0] == "/api/tts/key":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            provider = str(q.get("provider", [""])[0] or "").strip()
+            if provider not in ("xiaomi", "zai", "stepfun"):
+                return self._send(400, {"ok": False, "error": "unknown provider"})
+            key = _load_cfg_key(["providers", provider, "api_key"])
+            return self._send(200, {"ok": True, "provider": provider,
+                                   "configured": bool(key)})
         # v3.4.23 任务中心：进行中任务列表（流式任务 streaming 中 + 登记的后台作业）
         if self.path.startswith("/api/tasks/active") or self.path.startswith("/api/agent/tasks/active"):
             return self._send(200, _collect_active_tasks())
