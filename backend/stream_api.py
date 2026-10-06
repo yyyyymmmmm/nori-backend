@@ -439,7 +439,7 @@ def _collect_nas_status():
         # v2.0.102c：读动态 HERMES_KEY（hermes_upstream：持久化配置 > STREAM_HERMES_KEY；
         # 原直接读 env，App 改完设置不重启不生效）+
         #           健康检查打 /health（原打 /v1/chat/completions 是 POST 端点，GET 恒 405 → 永远误判离线）
-        hkey = HERMES_KEY
+        hkey = hermes_upstream.get_key()  # 2026-10-07：裸 HERMES_KEY 在函数内 NameError（PEP 562 不管用），直接调
         health_url = os.environ.get("STREAM_HERMES_HEALTH_URL", "") or hermes_upstream.health_url()
         r = subprocess.run(["curl", "-s", "-m", "3", "-o", "/dev/null", "-w", "%{http_code}",
                             "-H", "Authorization: Bearer " + hkey, health_url], capture_output=True, text=True, timeout=8)
@@ -2162,7 +2162,7 @@ def _worker(task_id, task):
                 req_body["model_options"] = _reasoning_options(st.get("reasoning"))   # v3.6.5 档位优先
             # 注意：不再 update(session_headers) —— 去掉 X-Hermes-Session-Id，
             # Hermes 改走 api_server_openai_routes.py:476 的 conversation_messages[:-1]（我们发的净化历史）。
-            full_headers = {"Authorization": "Bearer " + HERMES_KEY,
+            full_headers = {"Authorization": "Bearer " + hermes_upstream.get_key(),  # 2026-10-07：同上，裸 HERMES_KEY 会 NameError
                             "Content-Type": "application/json"}
             st["agent"] = True
             # v3.4.11 DIAG: dump 实际请求 body（消息角色+截断内容）以便定位复读种子
@@ -2251,7 +2251,7 @@ def _worker(task_id, task):
                 _write_state(task_id, task)
                 _maybe_push_app(st, task_id)   # 异常兜底也推（用户需知道本地模型不可用）
                 return
-        full_headers = {"Authorization": "Bearer " + HERMES_KEY, "Content-Type": "application/json"}
+        full_headers = {"Authorization": "Bearer " + hermes_upstream.get_key(), "Content-Type": "application/json"}  # 2026-10-07：裸 HERMES_KEY 会 NameError
         # v3.4.10 X方案：回退分支同样去掉 X-Hermes-Session-Id（防 state.db 未净化会话重建→复读）
         st["agent"] = False
         _hermes_stream_worker(task_id, task, req_body, full_headers, last_write)
@@ -3019,7 +3019,7 @@ class StreamHandler(BaseHTTPRequestHandler):
                     req_body["provider"] = provider
                 body = json.dumps(req_body).encode("utf-8")
                 req = urllib.request.Request(HERMES_URL, data=body, headers={
-                    "Authorization": "Bearer " + HERMES_KEY,
+                    "Authorization": "Bearer " + hermes_upstream.get_key(),  # 2026-10-07：裸 HERMES_KEY 会 NameError
                     "Content-Type": "application/json"
                 })
                 resp = urllib.request.urlopen(req, timeout=30)
