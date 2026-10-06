@@ -153,21 +153,86 @@ def probe():
     result["container"] = (cid[:12] if cid else None)
     if not cid:
         return result
+    # 2026-10-07 用户实测：NAS 上 Hermes 文件在 /home/agent/.hermes/ 下
     for label, path in [
-        ("MEMORY.md", "/app/memories/MEMORY.md"),
-        ("USER.md", "/app/memories/USER.md"),
-        ("config", "/app/config.yaml"),
-        ("state.db", "/app/state.db"),
+        ("MEMORY.md", "/home/agent/.hermes/memories/MEMORY.md"),
+        ("USER.md", "/home/agent/.hermes/memories/USER.md"),
+        ("config", "/home/agent/.hermes/config.yaml"),
+        ("state.db", "/home/agent/.hermes/state.db"),
     ]:
         ok, _ = read_hermes_file(path)
-        result["files"][label] = ok
+        result["files"][label] = path if ok else False
         if not ok:
-            # 试别的常见路径
-            for alt in [path.replace("/app/", "/data/"),
-                        path.replace("/app/", "~/"),
-                        path.replace("/app/", "/root/")]:
-                ok2, _ = read_hermes_file(alt)
-                if ok2:
-                    result["files"][label] = alt
-                    break
+            # 兜底试别的常见路径
+            for alt in ["/app/memories/MEMORY.md", "/app/memories/USER.md",
+                        "/app/config.yaml", "/app/state.db",
+                        "/data/memories/MEMORY.md", "/root/.hermes/memories/MEMORY.md"]:
+                if label.lower().replace(".", "") in alt.lower() or \
+                   (label == "config" and "config" in alt):
+                    ok2, _ = read_hermes_file(alt)
+                    if ok2:
+                        result["files"][label] = alt
+                        break
     return result
+
+
+def get_hermes_config():
+    """读 Hermes 的 config.yaml。返回 (ok, dict)。"""
+    for path in ["/home/agent/.hermes/config.yaml",
+                 "/home/agent/.hermes/config.yml",
+                 "/app/config.yaml"]:
+        ok, content = read_hermes_file(path)
+        if ok:
+            try:
+                import yaml
+                return True, yaml.safe_load(content)
+            except ImportError:
+                # 无 yaml 库，简单解析 providers 段
+                return True, {"_raw": content, "_path": path}
+            except Exception as e:
+                return False, str(e)[:100]
+    return False, "config not found"
+
+
+def get_hermes_models():
+    """从 Hermes 配置提取模型列表。返回 [{id, name, provider}]。"""
+    ok, cfg = get_hermes_config()
+    if not ok:
+        return False, []
+    models = []
+    if isinstance(cfg, dict):
+        # Hermes 配置格式：models 或 providers 段
+        for key in ("models", "providers"):
+            section = cfg.get(key)
+            if isinstance(section, dict):
+                for mid, info in section.items():
+                    if isinstance(info, dict):
+                        models.append({
+                            "id": str(mid),
+                            "name": str(info.get("name") or info.get("label") or mid),
+                            "provider": str(info.get("provider") or "hermes"),
+                        })
+                    elif isinstance(info, str):
+                        models.append({"id": str(mid), "name": info, "provider": "hermes"})
+            elif isinstance(section, list):
+                for item in section:
+                    if isinstance(item, dict) and item.get("id"):
+                        models.append({
+                            "id": str(item["id"]),
+                            "name": str(item.get("name") or item["id"]),
+                            "provider": str(item.get("provider") or "hermes"),
+                        })
+                    elif isinstance(item, str):
+                        models.append({"id": item, "name": item, "provider": "hermes"})
+    return True, models
+
+
+def get_hermes_memory():
+    """读 Hermes 的记忆文件。返回 {MEMORY.md: content, USER.md: content}。"""
+    mem = {}
+    for label, path in [("MEMORY.md", "/home/agent/.hermes/memories/MEMORY.md"),
+                        ("USER.md", "/home/agent/.hermes/memories/USER.md")]:
+        ok, content = read_hermes_file(path)
+        if ok:
+            mem[label] = content
+    return mem

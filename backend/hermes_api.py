@@ -109,6 +109,9 @@ class Handler(BaseHTTPRequestHandler):
     def _is_inspect_config(self, path):
         return path.endswith("/hermes/inspect/config")
 
+    def _is_inspect_hermes_models(self, path):
+        return path.endswith("/hermes/inspect/models")
+
     def _is_providers(self, path):
         return path.endswith("/hermes/providers")
 
@@ -190,32 +193,23 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._is_inspect_memory(path):
             import hermes_inspect
-            mem = {}
-            for label, p in [("MEMORY.md", "/app/memories/MEMORY.md"),
-                             ("USER.md", "/app/memories/USER.md")]:
-                ok, content = hermes_inspect.read_hermes_file(p)
-                if ok:
-                    mem[label] = content
-                else:
-                    # 试 probe 找到的实际路径
-                    import hermes_inspect as _hi
-                    probe = _hi.probe()
-                    alt = probe.get("files", {}).get(label)
-                    if alt and alt is not True:
-                        ok2, c2 = _hi.read_hermes_file(alt)
-                        if ok2:
-                            mem[label] = c2
-            self._send(200, {"memory": mem})
+            mem = hermes_inspect.get_hermes_memory()
+            self._send(200, {"memory": mem, "count": len(mem)})
             return
         if self._is_inspect_config(path):
             import hermes_inspect
-            ok, content = hermes_inspect.read_hermes_file("/app/config.yaml")
+            ok, content = hermes_inspect.read_hermes_file("/home/agent/.hermes/config.yaml")
             if not ok:
-                ok, content = hermes_inspect.read_hermes_file("/app/config.yml")
+                ok, content = hermes_inspect.read_hermes_file("/app/config.yaml")
             # 不返回完整 config（可能含密钥），只返回结构摘要
             self._send(200, {"ok": ok,
                              "has_config": ok,
                              "size": len(content) if ok else 0})
+            return
+        if self._is_inspect_hermes_models(path):
+            import hermes_inspect
+            ok, models = hermes_inspect.get_hermes_models()
+            self._send(200, {"ok": ok, "models": models, "count": len(models)})
             return
         if self._is_models(path):
             sel = hermes_upstream.get_selected()
