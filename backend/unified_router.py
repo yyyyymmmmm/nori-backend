@@ -97,6 +97,8 @@ ROUTE_TABLE = {
     # 故 nginx 三份 conf 无需改动；/api/usage 仅供内网直连调试）
     "/api/usage": ("stream_api", "StreamHandler"),
     "/api/agent/usage": ("stream_api", "StreamHandler"),
+    # v4.4.x 连接中心：/api/connections（App 设置页「服务」分组读这个；实现见 stream_api.py）
+    "/api/connections": ("stream_api", "StreamHandler"),
     # v3.9.41（修 bug 清单 C 的另一半）：这两个前缀 App 一直在调、蜂窝 relay 白名单
     # （stream_api.ALLOWED_RELAY）也已放行，但 9127 这里没有路由。
     # ⚠️ 2026-09-19 拿 NAS 的 nginx 实配校正过归因（原先写成「补表 → 蜂窝修好」，只对一半）：
