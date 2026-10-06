@@ -39,6 +39,8 @@ ROUTE_TABLE = {
     "/api/hw":        ("hw_api",       "HwHandler"),
     "/api/memory":    ("memory_api",   "MemoryHandler"),
     "/api/weather":   ("weather_api",  "WeatherHandler"),
+    # I 线（2026-10-06）：动态 feed（iOS 资讯 tab）→ GET /api/feed/units
+    "/api/feed":      ("feed_api",     "FeedHandler"),
     "/api/scenes":    ("scenes_api",   "Handler"),
     "/api/agent":     ("agent_api",    "Handler"),
     # v4.0.11 主动型 Agent 中枢。借 /api/agent 前缀 → lucky 白名单/relay/nginx 三处零改动。
