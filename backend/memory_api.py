@@ -120,6 +120,12 @@ class MemoryHandler(BaseHTTPRequestHandler):
                 self._send(200, {"ok": False, "message": "内容不能为空"})
                 return
             memory_store.add_entry(text)
+            # 2026-10-07：写闭环 —— 同步写 Hermes 的 MEMORY.md
+            try:
+                import hermes_inspect
+                hermes_inspect.append_hermes_memory(text)
+            except Exception:
+                pass
             self._send(200, {"ok": True, "message": "已记住", "entries": memory_store.list_entries()})
             return
         if parsed.path.startswith("/api/memory/delete"):

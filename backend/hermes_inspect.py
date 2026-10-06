@@ -305,3 +305,19 @@ def get_hermes_memory():
         if ok:
             mem[label] = content
     return mem
+
+
+def append_hermes_memory(text):
+    """往 Hermes 的 MEMORY.md 追加一条记忆。返回 (ok, msg)。"""
+    # 2026-10-07：记忆写闭环 —— App 端新增记忆时同步写 Hermes
+    path = "/home/agent/.hermes/memories/MEMORY.md"
+    # 用 printf 追加，避免引号转义问题；先确保目录存在
+    import time
+    ts = time.strftime("%Y-%m-%d")
+    # base64 编码后解码写入，防特殊字符
+    import base64
+    line = "- [%s] %s\n" % (ts, text.replace("\n", " "))
+    b64 = base64.b64encode(line.encode("utf-8")).decode("ascii")
+    cmd = "mkdir -p /home/agent/.hermes/memories && echo '%s' | base64 -d >> '%s'" % (b64, path)
+    ok, out = exec_in_hermes(cmd)
+    return ok, out if not ok else "ok"
