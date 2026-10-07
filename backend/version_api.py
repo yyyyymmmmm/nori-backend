@@ -101,13 +101,28 @@ def get_version_info():
         return _info_cache["data"]
 
     data = _read_version_file() or _read_git() or {}
+    # update.sh writes the literal "unknown" when this source tree has no .git.
+    # That marker is not a version and must not make the App report a false match.
+    version = data.get("version") or ""
+    if str(version).strip().lower() in {"unknown", "none", "null", "n/a"}:
+        version = ""
+    if not version:
+        version = os.environ.get(VERSION_ENV, "")
+    if str(version).strip().lower() in {"unknown", "none", "null", "n/a"}:
+        version = ""
+    commit = data.get("commit") or os.environ.get(COMMIT_ENV, "")
+    built = data.get("built") or os.environ.get(BUILT_ENV, "")
+    if str(commit).strip().lower() in {"unknown", "none", "null", "n/a"}:
+        commit = ""
+    if str(built).strip().lower() in {"unknown", "none", "null", "n/a"}:
+        built = ""
     info = {
         "ok": True,
         # 真值优先级：文件（最贴近"当前跑着的这份代码"）> 环境变量（镜像构建时注入）> .git
         # 逐字段回落：文件只给了 version 时，commit/built 仍可用 env 补
-        "version": data.get("version") or os.environ.get(VERSION_ENV, ""),
-        "commit": data.get("commit") or os.environ.get(COMMIT_ENV, ""),
-        "built": data.get("built") or os.environ.get(BUILT_ENV, ""),
+        "version": version,
+        "commit": commit,
+        "built": built,
         "modules": _module_count(),
     }
     _info_cache["ts"] = now

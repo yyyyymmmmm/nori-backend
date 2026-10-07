@@ -170,20 +170,26 @@ def _manual_deploy_result(detail=""):
     """
     try:
         import version_api
-        cur = version_api.get_version_info().get("version", "") or "未知"
+        info = version_api.get_version_info()
+        cur = str(info.get("version") or "").strip()
+        commit = str(info.get("commit") or "").strip()
     except Exception:
-        cur = "未知"
+        cur, commit = "", ""
     lines = []
     if detail:
         lines.append(detail.strip())
     lines += [
         "本部署是手动装法（未配置 QL_REPO_DIR），没有宿主 git 仓可查，"
         "无法自动核对远端是否有新提交。",
-        f"当前后端版本：{cur}",
+        (f"当前后端版本：{cur}" if cur else
+         (f"当前构建标识：{commit}（没有版本号）" if commit else
+          "当前后端没有可识别的版本号或 Git 提交信息")),
         "要更新请按本机原有方式手动执行（本机不支持 App 一键更新）。",
     ]
     return {"ok": True, "update_available": False, "behind": 0,
-            "manual": True, "log": "\n".join(lines)}
+            "manual": True, "version_known": bool(cur),
+            "current_version": cur, "commit": commit,
+            "log": "\n".join(lines)}
 
 
 def _run_check():

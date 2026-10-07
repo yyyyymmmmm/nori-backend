@@ -869,7 +869,7 @@ def _parse_feed(raw):
     for el in root.iter():
         if _local(el.tag) not in ("item", "entry"):
             continue
-        title, link, date = "", "", ""
+        title, link, date, summary, image = "", "", "", "", ""
         for ch in list(el):
             n = _local(ch.tag)
             if n == "title" and not title:
@@ -883,7 +883,20 @@ def _parse_feed(raw):
                     link = ch.text.strip()
             elif n in ("pubdate", "published", "updated", "date") and not date:
                 date = _text(ch)
-        out.append({"title": _clean(title, 120), "link": link.strip(), "published": _iso(date)})
+            elif n in ("description", "summary", "content", "encoded") and not summary:
+                summary = _text(ch)
+                if n == "content" and not image:
+                    image = ch.get("url") or ch.get("href") or ""
+            if n in ("thumbnail", "content") and not image:
+                image = ch.get("url") or ch.get("href") or ""
+            elif n == "enclosure" and not image:
+                media_type = (ch.get("type") or "").lower()
+                if media_type.startswith("image/"):
+                    image = ch.get("url") or ""
+        summary = re.sub(r"<[^>]+>", " ", summary)
+        summary = re.sub(r"\s+", " ", _clean(summary, 700)).strip()
+        out.append({"title": _clean(title, 120), "link": link.strip(), "published": _iso(date),
+                    "summary": summary, "imageURL": image.strip() if image.startswith(("http://", "https://")) else ""})
     return out
 
 
@@ -2085,7 +2098,7 @@ def _parse_feed(raw):
     for el in root.iter():
         if _local(el.tag) not in ("item", "entry"):
             continue
-        title, link, date = "", "", ""
+        title, link, date, summary, image = "", "", "", "", ""
         for ch in list(el):
             n = _local(ch.tag)
             if n == "title" and not title:
@@ -2099,7 +2112,20 @@ def _parse_feed(raw):
                     link = ch.text.strip()
             elif n in ("pubdate", "published", "updated", "date") and not date:
                 date = _text(ch)
-        out.append({"title": _clean(title, 120), "link": link.strip(), "published": _iso(date)})
+            elif n in ("description", "summary", "content", "encoded") and not summary:
+                summary = _text(ch)
+                if n == "content" and not image:
+                    image = ch.get("url") or ch.get("href") or ""
+            if n in ("thumbnail", "content") and not image:
+                image = ch.get("url") or ch.get("href") or ""
+            elif n == "enclosure" and not image:
+                media_type = (ch.get("type") or "").lower()
+                if media_type.startswith("image/"):
+                    image = ch.get("url") or ""
+        summary = re.sub(r"<[^>]+>", " ", summary)
+        summary = re.sub(r"\s+", " ", _clean(summary, 700)).strip()
+        out.append({"title": _clean(title, 120), "link": link.strip(), "published": _iso(date),
+                    "summary": summary, "imageURL": image.strip() if image.startswith(("http://", "https://")) else ""})
     return out
 
 

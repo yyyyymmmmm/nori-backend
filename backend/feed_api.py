@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""动态 feed API（I 线，2026-10-06；2026-10-07 加历史+分页+配图）：供 iOS 资讯 tab。
+"""动态 feed API（2026-10-06；2026-10-07 加历史/分页/原文配图）：供 iOS 动态页。
 
 GET /api/feed/units?prompt=...&limit=6&offset=0&paged=1&refresh=1
   · 默认返回顶层数组（兼容老 iOS）
@@ -8,10 +8,11 @@ GET /api/feed/units?prompt=...&limit=6&offset=0&paged=1&refresh=1
   FeedUnit = {"id","title","bodyMarkdown","category":"tech|ai|oss",
               "imageURL":null,"publishedAt":"ISO8601","likes":0}
 
-链路：Hermes 上游 → 生成 JSON 卡片 → 校验归一化 → 从原文提取 og:image
+链路：life_api 配置的真实 RSS → Hermes 可选排序 → 从 RSS 或原文提取图片
       → 追加历史（最多 200 条）→ 返回分页。
 
-图片：从 bodyMarkdown 里的真实新闻链接抓 og:image，不编造；抓不到就 null。
+动态标题、链接、摘要和时间来自 RSS；Hermes 只排序/分类，不生成内容。图片优先取 RSS 媒体字段，
+其次抓原文 og:image；来源没有图片时返回 null，不编造。
 """
 import hashlib
 import glob
@@ -352,36 +353,83 @@ def _write_cache(prompt, units):
 
 
 def _generate(prompt, limit):
-    """调 Hermes 生成动态卡片。任何失败 → []（上层回诚实空态）。"""
-    import hermes_upstream
-    base = hermes_upstream.get_base_url()
-    if not base:
-        return []
-    key = hermes_upstream.get_key()
-    url = base.rstrip("/") + "/v1/chat/completions"
-    # The upstream is Hermes's OpenAI-compatible gateway. The selected provider
-    # model lives in Hermes config.yaml; this endpoint accepts the gateway alias.
-    model = os.environ.get("QL_FEED_MODEL") or "hermes-agent"
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": _USER_TMPL.format(
-                prompt=prompt, today=_iso_z(datetime.now(timezone.utc))[:10], n=limit)},
-        ],
-        "stream": False,
-        "temperature": 0.7,
-        "model_options": {"reasoning": {"enabled": False}},
-    }
-    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    if key:
-        headers["Authorization"] = "Bearer " + key
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as resp:
-        raw = json.loads(resp.read().decode("utf-8", "replace"))
-    content = ((raw.get("choices") or [{}])[0].get("message", {}) or {}).get("content") or ""
-    return _normalize_units(_extract_json_array(content))
+    """Build from real configured RSS entries; Hermes may rank them but cannot invent posts."""
+    import life_api
+    cfg = life_api.load_config()
+    rss = life_api._collect_feeds(cfg)
+    units = []
+    for item in rss.get("entries", []):
+        title = str(item.get("title") or "").strip()
+        link = str(item.get("link") or "").strip()
+        published = str(item.get("published") or "").strip()
+        if not title or not link.startswith(("https://", "http://")) or not _parse_time(published):
+            continue
+        source = str(item.get("source") or "资讯")
+        summary = str(item.get("summary") or "").strip()
+        body = (summary + "\n\n" if summary else "") + "来源：[" + source + "](" + link + ")"
+        category = "ai" if any(k in (title + source).lower() for k in ("ai", "人工智能", "大模型", "机器学习")) else \
+                   "oss" if any(k in (title + source).lower() for k in ("github", "开源", "linux", "solidot")) else "tech"
+        units.append({"title": title, "bodyMarkdown": body, "category": category,
+                      "imageURL": item.get("imageURL") or None,
+                      "publishedAt": published, "likes": 0})
+    units = _rank_real_entries(prompt, units)
+    return _normalize_units(units[:max(limit, 1)])
+
+
+def _rank_real_entries(prompt, units):
+    """Optional interest ranking over RSS rows. On any Hermes issue, preserve the real feed."""
+    if len(units) < 2:
+        return units
+    try:
+        import hermes_upstream
+        base = hermes_upstream.get_base_url()
+        if not base:
+            return units
+        rows = [{"index": i, "title": u["title"],
+                 "summary": (u.get("bodyMarkdown") or "")[:500]} for i, u in enumerate(units)]
+        payload = {
+            "model": os.environ.get("QL_FEED_MODEL") or "hermes-agent",
+            "messages": [
+                {"role": "system", "content": "你只能给输入的真实 RSS 条目排序和分类。只返回 JSON 数组，每项包含 index 和 category（tech/ai/oss）。严禁增删或改写条目。"},
+                {"role": "user", "content": "关注主题：%s\n真实条目：%s" %
+                 (str(prompt or "")[:500], json.dumps(rows, ensure_ascii=False))},
+            ],
+            "stream": False,
+            "temperature": 0,
+            "model_options": {"reasoning": {"enabled": False}},
+        }
+        headers = {"Content-Type": "application/json"}
+        key = hermes_upstream.get_key()
+        if key:
+            headers["Authorization"] = "Bearer " + key
+        req = urllib.request.Request(base.rstrip("/") + "/v1/chat/completions",
+                                     data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                                     headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = json.loads(resp.read().decode("utf-8", "replace"))
+        content = ((raw.get("choices") or [{}])[0].get("message", {}) or {}).get("content") or ""
+        ranked = _extract_json_array(content)
+        by_index = {i: unit for i, unit in enumerate(units)}
+        out, seen = [], set()
+        for row in ranked:
+            if not isinstance(row, dict):
+                continue
+            try:
+                index = int(row.get("index"))
+            except (TypeError, ValueError):
+                continue
+            if index not in by_index or index in seen:
+                continue
+            unit = dict(by_index[index])
+            category = str(row.get("category") or "").lower()
+            if category in _CATS:
+                unit["category"] = category
+            out.append(unit)
+            seen.add(index)
+        return out + [u for i, u in by_index.items() if i not in seen] if out else units
+    except Exception as exc:
+        print("[feed] Hermes ranking skipped; using RSS order: %s" % str(exc)[:160], flush=True)
+        return units
 
 
 def _regen_worker(prompt, limit):
