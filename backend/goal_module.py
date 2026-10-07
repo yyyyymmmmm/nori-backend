@@ -472,7 +472,7 @@ def _agent_chat(prompt, timeout=120):
     走 /v1/chat/completions 的非流式形态：只要 final content，不做流式拆段。
     ⚠️ 上游超时会抛，调用方必须自己兜住（push_now 里按 error 收尾，不留僵尸 running）。
     """
-    body = {"model": os.environ.get("QL_GOAL_PUSH_MODEL") or "default",
+    body = {"model": os.environ.get("QL_GOAL_PUSH_MODEL") or "hermes-agent",
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
             "model_options": {"reasoning": {"enabled": False}}}

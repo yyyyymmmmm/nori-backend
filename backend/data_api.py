@@ -2,16 +2,16 @@
 # -*- coding: utf-8 -*-
 """数据导出：GET /api/data/export?format=json|zip。
 
-打包用户数据：记忆条目 + Soul 人设 + 定时任务配置 + 通知偏好。
+打包用户数据：Hermes 原生记忆 + 定时任务配置 + 通知偏好。
 **不含任何 token/密钥**：只取白名单字段，导出前做键名扫描兜底
 （含 key/token/secret/password/auth/credential 的键直接丢弃）。
 
 端点（unified_router 9127 挂载 /api/data 前缀；另有 /api/agent/data 别名，
 借 /api/agent 前缀 → lucky 白名单/relay/nginx 三处零改动）：
-  GET /api/data/export?format=json  → {"exported_at", "memory", "soul",
+  GET /api/data/export?format=json  → {"exported_at", "memory",
                                        "cron_tasks", "notify_prefs"}（下载 JSON）
   GET /api/data/export?format=zip   → zip 下载（标准库 zipfile）：
-                                       memory.json / soul.json /
+                                       hermes_memory.json /
                                        cron_tasks.json / notify_prefs.json /
                                        README.txt
 
@@ -28,9 +28,7 @@ import zipfile
 from http.server import BaseHTTPRequestHandler
 
 import hermes_upstream
-import memory_store
 import notify_prefs
-import soul_store
 
 # 键名黑名单（大小写不敏感）：命中则丢弃，纵深防御
 _SECRET_KEY_HINTS = ("key", "token", "secret", "password", "passwd",
@@ -83,11 +81,16 @@ def _fetch_cron_tasks():
 
 def build_export():
     """组装导出字典（已清洗，不含密钥）。"""
+    memory = {}
+    try:
+        import hermes_inspect
+        memory = hermes_inspect.get_hermes_memory()
+    except Exception:
+        pass
     payload = {
         "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "app": "qingliao",
-        "memory": memory_store.list_entries(),
-        "soul": soul_store.get_custom(),
+        "memory": memory,
         "cron_tasks": _fetch_cron_tasks(),
         "notify_prefs": notify_prefs.get_prefs(),
     }
@@ -99,8 +102,7 @@ _EXPORT_README = """轻聊数据导出
 导出时间：{exported_at}
 
 文件说明：
-  memory.json       AI 记忆条目
-  soul.json         Soul 人设（未设置则为 null）
+  hermes_memory.json Hermes 原生 MEMORY.md / USER.md 内容
   cron_tasks.json   定时任务配置
   notify_prefs.json 通知偏好
 
@@ -113,11 +115,8 @@ def build_zip(payload):
     """把导出字典打成 zip bytes。"""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("memory.json",
-                    json.dumps({"entries": payload["memory"]},
-                               ensure_ascii=False, indent=2))
-        zf.writestr("soul.json",
-                    json.dumps({"soul": payload["soul"]},
+        zf.writestr("hermes_memory.json",
+                    json.dumps({"files": payload["memory"]},
                                ensure_ascii=False, indent=2))
         zf.writestr("cron_tasks.json",
                     json.dumps({"tasks": payload["cron_tasks"]},

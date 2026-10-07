@@ -239,7 +239,6 @@ def _default_runner(prompt, on_chunk, cancel_event):
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = "Bearer " + key
-    model = hermes_upstream.get_selected_model()
     messages = [
         {"role": "system",
          "content": "你是后台任务执行者。用户不在场，请独立完成下面的任务，"
@@ -247,8 +246,8 @@ def _default_runner(prompt, on_chunk, cancel_event):
         {"role": "user", "content": prompt},
     ]
     body = {"messages": messages, "stream": True}
-    if model:
-        body["model"] = model
+    # Let Hermes resolve the model/provider from its own config.yaml. Sending a
+    # custom provider's internal model ID here targets the gateway's wrong alias.
     req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                  headers=headers, method="POST")
     out = []

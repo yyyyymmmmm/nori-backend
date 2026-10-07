@@ -18,18 +18,10 @@
 import json
 import os
 import re
-import subprocess
-import tempfile
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
-# Hermes config.yaml 路径（qingliao 容器已挂载 /volume1，hermes-data 同一宿主目录）
-# ⚠️ 生产口径：本值是 Hermes 网关真正读取的 config.yaml（mcp_servers 写在这里），
-# 不能改成 QL_HERMES_CONFIG（那是轻聊侧 provider key 台账，Hermes 不读）——否则
-# App「MCP 工具服务」的保存会写进没人读的文件而静默失效。
-HERMES_CONFIG_PATH = os.environ.get("QL_HERMES_CONFIG","/volume1/docker/hermes/hermes-data/config.yaml")
-HERMES_CONTAINER = "hermes-hermes-1"
 RESTART_STATUS_FILE = "/data/streams_data/mcp_restart_status.json"
 
 # 预置 MCP 模板（App 端展示用；key 由用户填入 URL 的 {key} 占位）
@@ -46,92 +38,33 @@ MCP_TEMPLATES = [
 _LOCK = threading.Lock()
 _RESTARTING = False
 
-_MARK_BEGIN = "# == qingliao-mcp-begin =="
-_MARK_END = "# == qingliao-mcp-end =="
-
-
-# ── YAML mcp_servers 标记块读写（文本级，不动 config 其他内容）──
-
-def _read_config_text():
-    with open(HERMES_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return f.read()
-
-
-def _write_config_text(text):
-    # BE20：唯一 tmp + fsync，权限沿用原文件（config.yaml 含 API key，且 Hermes 侧要能读）
-    try:
-        _st = os.stat(HERMES_CONFIG_PATH)
-        _mode = _st.st_mode & 0o777
-        _uid, _gid = _st.st_uid, _st.st_gid
-    except OSError:
-        _mode = 0o644
-        _uid = _gid = None
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(HERMES_CONFIG_PATH) or ".", suffix=".tmp")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    try:
-        os.chmod(tmp, _mode)
-    except OSError:
-        pass
-    os.replace(tmp, HERMES_CONFIG_PATH)
-    # 2026-09-21 修：mkstemp 产物属 root，replace 后 owner 变 root → Hermes(uid 10000)读不了
-    # 只沿用 mode 不够，必须复原 owner（否则 Hermes 报 config.yaml corrupt / EACCES）
-    if _uid is not None:
-        try:
-            os.chown(HERMES_CONFIG_PATH, _uid, _gid)
-        except OSError:
-            pass
-
-
-def _render_servers_yaml(servers):
-    lines = [_MARK_BEGIN, "mcp_servers:"]
-    for name, entry in servers.items():
-        lines.append("  %s:" % name)
-        lines.append("    url: %s" % entry["url"])
-        lines.append("    enabled: %s" % ("true" if entry.get("enabled", True) else "false"))
-    lines.append(_MARK_END)
-    return "\n".join(lines)
-
-
 def _load_servers():
-    """从标记块解析 servers dict；无块返回 {}"""
-    try:
-        text = _read_config_text()
-    except Exception:  # noqa: BLE001
+    """Read MCP servers from the live Hermes config; never report a stale mirror."""
+    import hermes_inspect
+    ok, config = hermes_inspect.get_hermes_config()
+    if not ok or not isinstance(config, dict):
+        raise RuntimeError("无法读取 Hermes 正在使用的 config.yaml: %s" % config)
+    configured = config.get("mcp_servers")
+    if configured is None:
         return {}
-    m = re.search(re.escape(_MARK_BEGIN) + r"\n(.*?)" + re.escape(_MARK_END), text, re.S)
-    if not m:
-        return {}
+    if not isinstance(configured, dict):
+        raise RuntimeError("Hermes config 的 mcp_servers 不是字典")
     servers = {}
-    cur = None
-    for line in m.group(1).splitlines():
-        top = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
-        if top:
-            cur = top.group(1)
-            servers[cur] = {}
-            continue
-        url = re.match(r"^\s+url:\s*(\S+)", line)
-        en = re.match(r"^\s+enabled:\s*(\S+)", line)
-        if cur and url:
-            servers[cur]["url"] = url.group(1)
-        elif cur and en:
-            servers[cur]["enabled"] = en.group(1).lower() in ("true", "yes", "1")
+    for name, value in configured.items():
+        if isinstance(value, dict):
+            # Keep all Hermes-specific fields (headers, transport, env, etc.)
+            # in memory so saving one server does not erase the other entries.
+            servers[str(name)] = dict(value)
+        else:
+            servers[str(name)] = value
     return servers
 
 
 def _save_servers(servers):
-    text = _read_config_text()
-    block = _render_servers_yaml(servers) if servers else ""
-    pat = re.compile(re.escape(_MARK_BEGIN) + r"\n.*?" + re.escape(_MARK_END) + "\n?", re.S)
-    if pat.search(text):
-        text = pat.sub(block + ("\n" if block else ""), text)
-    elif block:
-        if not text.endswith("\n"):
-            text += "\n"
-        text += "\n" + block + "\n"
-    _write_config_text(text)
+    import hermes_inspect
+    ok, detail = hermes_inspect.update_hermes_config("mcp_servers", servers)
+    if not ok:
+        raise RuntimeError(detail)
 
 
 def _restart_hermes_async():
@@ -148,12 +81,16 @@ def _restart_hermes_async():
         try:
             import datetime
             status["ts"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            r = subprocess.run(["docker", "restart", HERMES_CONTAINER],
-                               capture_output=True, text=True, timeout=120)
-            if r.returncode == 0:
+            import hermes_inspect
+            cid = hermes_inspect.find_hermes_container()
+            if not cid:
+                raise RuntimeError("找不到 Hermes 容器")
+            code, result = hermes_inspect._docker_api(
+                "POST", "/containers/%s/restart?t=10" % urllib.parse.quote(str(cid), safe=""))
+            if code in (204, 200):
                 status["ok"] = True
             else:
-                status["error"] = (r.stderr or r.stdout or "restart failed")[:300]
+                status["error"] = str(result or "Hermes restart failed")[:300]
         except Exception as exc:  # noqa: BLE001
             status["error"] = str(exc)[:300]
         finally:
@@ -207,16 +144,30 @@ class Handler(BaseHTTPRequestHandler):
             return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path.startswith("/api/mcp/servers"):
-            servers = _load_servers()
-            safe = {}
+            try:
+                servers = _load_servers()
+            except Exception as exc:  # noqa: BLE001
+                self._send(503, {"ok": False, "error": str(exc)[:200]})
+                return
+            safe = []
+            legacy_map = {}
             for name, e in servers.items():
-                url = e.get("url", "")
-                safe[name] = {
+                e = e if isinstance(e, dict) else {}
+                url = str(e.get("url") or "")
+                entry = {
+                    "name": name,
                     "url": _mask_key(url),
                     "has_key": "key=" in url,
                     "enabled": e.get("enabled", True),
+                    "is_template": False,
                 }
-            self._send(200, {"ok": True, "servers": safe, "templates": MCP_TEMPLATES})
+                safe.append(entry)
+                legacy_map[name] = {k: v for k, v in entry.items() if k != "name"}
+            # Both current iOS callers expect a name-keyed dictionary. Keep a
+            # secondary array for clients that prefer list iteration.
+            self._send(200, {"ok": True, "servers": legacy_map,
+                             "servers_list": safe,
+                             "templates": MCP_TEMPLATES})
             return
         if parsed.path.startswith("/api/mcp/restart_status"):
             st = {}
@@ -278,7 +229,9 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             servers = _load_servers()
-            servers[name] = {"url": url, "enabled": enabled}
+            entry = dict(servers.get(name) or {})
+            entry.update({"url": url, "enabled": enabled})
+            servers[name] = entry
             _save_servers(servers)
         except Exception as exc:  # noqa: BLE001
             self._send(500, {"ok": False, "error": "写配置失败: %s" % exc})

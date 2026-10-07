@@ -385,7 +385,7 @@ def get_hidden_models():
 def save_hidden_models(provider, model_ids):
     """整体替换某服务商的隐藏名单。返回 (ok, error_zh)。"""
     provider = str(provider or "").strip()
-    if provider not in {p["id"] for p in get_providers()}:
+    if not provider:
         return False, "服务商不存在"
     hidden = get_hidden_models()
     ids = [str(x).strip() for x in (model_ids or []) if str(x).strip()]

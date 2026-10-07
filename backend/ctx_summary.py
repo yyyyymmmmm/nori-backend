@@ -202,7 +202,7 @@ def _spawn(sid, older, fp, n, path, ask, chars, src_chars):
     threading.Thread(target=run, daemon=True, name="ctx-summary").start()
 
 
-def apply(msgs, session_id, ask, recent_turns=None, data_dir=None):
+def apply(msgs, session_id, ask, recent_turns=None, data_dir=None, minimum_chars=None):
     """最近 N 轮原样 + 早期转摘要。
 
     入参：msgs = 净化后的消息列表（dict）；session_id = 轻聊会话 id（缓存键）；
@@ -213,6 +213,9 @@ def apply(msgs, session_id, ask, recent_turns=None, data_dir=None):
     turns = _env_int("STREAM_CTX_RECENT_TURNS", 6) if recent_turns is None else int(recent_turns)
     meta = {"dropped": 0, "source": "off", "cached_n": None}
     if turns <= 0 or len(msgs) <= turns * 2:
+        return msgs, "", meta
+    if minimum_chars is not None and sum(len(_text(m)) for m in msgs) < int(minimum_chars):
+        meta["source"] = "below-threshold"
         return msgs, "", meta
 
     kept = msgs[-turns * 2:]

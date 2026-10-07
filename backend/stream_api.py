@@ -20,16 +20,9 @@ import hashlib
 import hmac
 import json
 import os
-import kb_inject
 import doc_ref          # v3.9.44：附件正文按需注入（消息只存 doc= 引用）
-try:
-    import ctx_summary       # v3.9.80 上下文策略：最近 N 轮原样 + 早期转摘要
-except Exception:            # 模块缺失也不能让服务起不来（宁可退回全量发历史）
-    ctx_summary = None
-import memory_store
 import media_convert  # v2.0.130: MEDIA:路径→data URL 图片
 import hermes_upstream  # Hermes 上游统一解析（App 设置页可配；取值动态，免重启）
-import soul_store  # Soul 人设用户自定义（App 设置页可配；取值动态，免重启）
 import re
 try:
     import yaml as _yaml  # V1.5.9 同步模型列表用（读 config.yaml 的 provider key）
@@ -1287,20 +1280,31 @@ def _route_decision(st, rule_agent, last_user):
 
 
 def _chat_once(body, url=None, key=None):
-    """一次性问答（非流式）。App「AI 翻译」/ Siri 问轻聊 / 上下文压缩摘要都走这里。
+    """Compatibility wrapper: all Nori one-shot AI requests use Hermes configuration.
 
-    v3.9.89 fix：opencode Go 上游要求 `x-opencode-session` 头，否则一律 400
-    MissingSessionID（实测 2026-09-26）。缺头 → 上游报错 → App 翻译浮层每次都落
-    「没拿到译文」卡，其他走本函数的出口一并静默降级。带别的 provider 时这个头无害。
+    The legacy URL/key arguments remain accepted during migration, but no longer
+    select an independent Nori-side model or provider.
     """
-    import urllib.request
-    req = urllib.request.Request(url or AGENT_URL, data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json",
-                                          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                                          "x-opencode-session": "ql-" + uuid.uuid4().hex,
-                                          "Authorization": "Bearer " + (key or _agent_key())}, method="POST")
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return json.loads(r.read())
+    messages = body.get("messages") if isinstance(body, dict) else None
+    if not isinstance(messages, list) or not messages:
+        raise ValueError("messages required")
+    return _hermes_chat_once(messages, max_tokens=body.get("max_tokens") or 2048)
+
+
+def _hermes_chat_once(messages, max_tokens=2048, timeout=120):
+    """One-shot request through the configured Hermes gateway, using Hermes' model."""
+    base = hermes_upstream.get_base_url().rstrip("/")
+    endpoint = base + ("/chat/completions" if base.endswith("/v1") else "/v1/chat/completions")
+    body = {"model": "hermes-agent", "messages": messages,
+            "stream": False, "max_tokens": int(max_tokens)}
+    headers = {"Content-Type": "application/json"}
+    key = hermes_upstream.get_key()
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    req = urllib.request.Request(endpoint, data=json.dumps(body).encode("utf-8"),
+                                 headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8", "replace"))
 
 
 def _agent_endpoint(model, provider):
@@ -1340,8 +1344,6 @@ def _agent_loop(messages, task=None, model=None, provider=None):
     try:
         msgs = _sanitize_history(messages)
         msgs = [m for m in msgs if isinstance(m, dict) and m.get("role") != "system"]
-        import agent_rules
-        hint = agent_rules.rules_hint()
         sys_content = ("你是家庭 NAS 管家 Agent。可以调用工具查询/控制 NAS、Docker、智能家居。"
                        "工具结果如实转达用户；失败要说明原因和建议。回答简洁中文，用 emoji 点缀。"
                        "重要：定时/自动化请求（如'X分钟后执行Y'、'定时关闭XX'）必须调用 automation_create 工具真正创建，"
@@ -1362,8 +1364,6 @@ def _agent_loop(messages, task=None, model=None, provider=None):
             msgs.append({"role": "user",
                          "content": "（系统指令：请立即调用 automation_create 工具创建上述定时任务，"
                                     "确认工具执行成功后再回复用户，禁止仅文字回复“已设置/已安排”。）"})
-        if hint:
-            sys_content += "\n" + hint
         # v3.2.1：断掉"最新 user 前紧贴 assistant"的续写诱因（防复读终极，Agent 路统一）
         # 注意：不做 KEEP_MSGS 收窄——Agent 有 tool_calls↔tool 配对，收窄会切断配对导致孤立 tool 消息
         # v3.2.4：全量压缩超长 assistant（Agent 全量历史 = 最多长文素材，只压 1 条无效）
@@ -1372,7 +1372,6 @@ def _agent_loop(messages, task=None, model=None, provider=None):
         sys_content += QCARD_PROMPT   # v3.9.31 ql-card 协议
         sys_content += QLACTION_PROMPT   # v3.9.95 ql-action 本地动作协议
         sys_content += _soul_prompt()    # soul 可配（/api/soul），免重启生效
-        sys_content += memory_store.prompt_block()   # v3.9.95 AI 记忆注入（哈希门控稳定前缀）
         sys_p = {"role": "system", "content": sys_content}
         msgs = [sys_p] + msgs
         _log_sent_messages("agent", msgs)
@@ -1621,12 +1620,8 @@ SOUL_PROMPT = (
 
 
 def _soul_prompt():
-    """Soul 人设动态读取：用户经 /api/soul 自定义过则用自定义，否则用内置默认。
-    落盘即生效，无需重启。"""
-    try:
-        return soul_store.get_soul(SOUL_PROMPT)
-    except Exception:  # noqa: BLE001
-        return SOUL_PROMPT
+    """通用客户端输出协议；用户级规则只从 Hermes 原生配置读取。"""
+    return SOUL_PROMPT
 
 # v3.9.31：ql-card 结果卡片协议（App 端 v3.5.0 起 AgentCardParser 已解析渲染）。
 # 注入 5 处 system prompt 组装点；纪律段防滥用：仅结构化结果类回复收尾用，闲聊禁用。
@@ -1810,8 +1805,8 @@ def _build_messages(st):
     base_sys[0]["content"] += QCARD_PROMPT   # v3.9.31 ql-card 协议
     base_sys[0]["content"] += QLACTION_PROMPT   # v3.9.95 ql-action 本地动作协议
     base_sys[0]["content"] += _soul_prompt()    # soul 可配（/api/soul），免重启生效
-    base_sys[0]["content"] += memory_store.prompt_block()   # v3.9.95 AI 记忆注入（哈希门控稳定前缀）
-    final = base_sys + kb_inject.inject(msgs)
+    # Hermes 是记忆与知识上下文的唯一来源；Nori 不再注入本地 memory.json / KB。
+    final = base_sys + msgs
     _log_sent_messages("normal", final)
     return final
 
@@ -1821,7 +1816,9 @@ def _use_hermes_session():
     开=请求体只传最新 user 消息，上下文由 Hermes 9123 按 X-Hermes-Session-Id 从
     state.db 管理（微信通道同款，从不复读/丢上下文）；关=回退现有 _build_messages
     全量塞消息+轻聊侧防复读（现状，可一键回退）。"""
-    return os.environ.get("STREAM_HERMES_SESSION", "0") == "1"
+    # Nori is a Hermes client. Keep the old variable for deployment compatibility,
+    # but always use Hermes instead of a second Nori-side provider/agent path.
+    return True
 
 
 def _hermes_session_header(session_id):
@@ -1851,7 +1848,6 @@ def _build_hermes_agent_prompt(st, last_user):
     sys_content += QCARD_PROMPT
     sys_content += QLACTION_PROMPT   # v3.9.95 ql-action 本地动作协议
     sys_content += _soul_prompt()    # soul 可配（/api/soul），免重启生效
-    sys_content += memory_store.prompt_block()   # v3.9.95 AI 记忆注入（哈希门控稳定前缀）
     # v3.9.72 P0.1 任务化回复
     sys_content += TASK_PROMPT
     # v3.3.1：多模态 content 原样透传
@@ -1878,38 +1874,6 @@ def _compress_all_assistants(msgs):
     return out
 
 
-def _ctx_summary_ask(st):
-    """v3.9.80：摘要模型的单次调用（只被 ctx_summary 的后台线程调用，绝不阻塞本轮回复）。
-
-    默认复用**当前请求的** model/provider（保证模型名一定可用）；可用
-    STREAM_CTX_SUMMARY_MODEL / STREAM_CTX_SUMMARY_PROVIDER 指定更便宜的小模型。
-    关掉思考链：摘要不需要推理过程，且推理模型会把 max_tokens 花在 reasoning 上（实测踩过）。
-    任何异常都返回空串 —— 调用方回落到「已省略」占位，绝不影响本轮回复。
-    """
-    def ask(prompt):
-        try:
-            m = os.environ.get("STREAM_CTX_SUMMARY_MODEL") or st.get("model") or AGENT_MODEL
-            p = os.environ.get("STREAM_CTX_SUMMARY_PROVIDER") or st.get("provider") or "deepseek"
-            url, key, model = _agent_endpoint(m, p)
-            if not url:
-                return ""
-            body = {"model": model or m,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": False,
-                    "max_tokens": 1200}
-            if str(p or "").lower() not in ("local", "ollama"):
-                body["model_options"] = {"reasoning": {"enabled": False}}
-            j = _chat_once(body, url=url, key=key)
-            ch = j.get("choices") if isinstance(j, dict) else None
-            if not ch:
-                return ""
-            out = ((ch[0] or {}).get("message") or {}).get("content") or ""
-            return out if isinstance(out, str) else ""
-        except Exception:
-            return ""
-    return ask
-
-
 def _build_hermes_messages(st, last_user, is_agent):
     """v3.4.10 X方案：发「断种子净化完整历史」给 Hermes 9123（不再靠 state.db 重建）。
 
@@ -1921,25 +1885,9 @@ def _build_hermes_messages(st, last_user, is_agent):
     模型上下文=净化历史，不复读；模型选择/图片/流式/工具全部保留。
     v3.3.1：last_user 可能是 list（多模态 content 含图片），原样透传不压字符串。"""
     raw = st.get("messages") or []
-    _ctx_text = ""
     if raw:
         sanitized = _sanitize_history(raw)
-        # v3.9.80 上下文策略：最近 N 轮原样 + 早期转摘要（省 token 的大头就在「每轮重发历史」）。
-        # ⚠️ 必须在 _compress_long_assistants 之前跑 —— 那一步会把早期 assistant 压成占位，
-        # 摘要模型就只看得到一堆占位符，摘要等于废的。
-        # 摘要在后台线程生成 + 缓存复用（都在 ctx_summary 里），绝不阻塞本轮；这轮拿不到就先
-        # 用「（更早的 N 条对话已省略，摘要生成中）」占位，下一轮就有真摘要。
-        try:
-            if ctx_summary is not None:
-                sanitized, _ctx_text, _ctx_meta = ctx_summary.apply(
-                    sanitized, st.get("sessionId"), _ctx_summary_ask(st))
-                if _ctx_meta.get("dropped"):
-                    print("[ctx] sid=%s 折叠=%d条 保留=%d条 摘要=%d字 source=%s"
-                          % (st.get("sessionId"), _ctx_meta.get("dropped"), _ctx_meta.get("kept") or 0,
-                             _ctx_meta.get("len") or 0, _ctx_meta.get("source")), flush=True)
-        except Exception as _e:      # 摘要策略失败绝不影响回复（退回全量发历史）
-            _ctx_text = ""
-            print("[ctx] 上下文折叠失败（按原样全量发历史）：%r" % (_e,), flush=True)
+        # Hermes manages context compaction; Nori only forwards the current transcript.
         sanitized = _compress_long_assistants(sanitized)
         sanitized = _break_repeat_seed(sanitized)
     else:
@@ -1969,11 +1917,6 @@ def _build_hermes_messages(st, last_user, is_agent):
     sys_content += QLACTION_PROMPT   # v3.9.95 ql-action 本地动作协议
     sys_content += TASK_PROMPT   # v3.9.72 P0.1 任务化回复
     sys_content += _soul_prompt()    # soul 可配（/api/soul），免重启生效
-    sys_content += memory_store.prompt_block()   # v3.9.95 AI 记忆注入（哈希门控稳定前缀）
-    if _ctx_text:
-        # v3.9.80：早期对话摘要拼进**首条 system**（Responses 协议只认首条 system 平移到
-        # instructions；在 messages 中间插 system 会被当历史消息发给模型，观感=莫名指令）。
-        sys_content += "\n\n" + _ctx_text
     return [{"role": "system", "content": sys_content}] + sanitized
 
 
@@ -1999,7 +1942,6 @@ def _worker(task_id, task):
     try:
         # v3.2.7（方案C）：统一走 Hermes 会话托管。上下文由 Hermes 按 sessionId 管理，
         # 轻聊不再自己拼历史+防复读（复读根因）。_apply_bot 已在方案C移除（bot 模式废除）。
-        import agent_rules
         last_user = None   # 必须初始化（messages 无 user 时会走 or "" 兜底）
         last_user_text = ""  # v3.3.1：纯文本版（供规则判断/日志），保留原始 last_user 供图片透传
         for m in reversed(st["messages"]):
@@ -2010,27 +1952,8 @@ def _worker(task_id, task):
                 else:
                     last_user_text = str(last_user or "")
                 break
-        new_rule = agent_rules.extract_from_text(last_user_text)
-        if new_rule:
-            agent_rules.add_rule(new_rule)
-        # v4.0.120「AI 记住瞬间」（第 2 项）：把「记住…」类消息**当场落盘**并回报给 App。
-        # 🚨 事故背景（代码审查）：memory_store.check_and_save() 一直只被同文件的 inject() 调用，
-        # 而 inject() 全仓**零调用点**（stream_api 只用 prompt_block() 读记忆）→ 用户在聊天里说
-        # 「记住我喜欢喝美式」从来没存过，记忆页里也永远不会多出一条；App 侧更是没有任何
-        # 「刚记住了」的可挂载点。这与记忆页的增删改（三处 API 都活着）不冲突，缺的是**自动写入**
-        # 这条链路 + 写入瞬间的用户可见反馈。
-        # 口径：只报 check_and_save **本次真正新增**的条目（去重命中返回空列表，天然不重复弹气泡）。
-        # 存失败/无新增都不写 st["memoAdded"]，App 侧不显示任何东西（静默不误导）。
-        try:
-            _memo_new = memory_store.check_and_save(
-                last_user_text, session_id=str(st.get("sessionId") or "")) or []
-            if _memo_new:
-                _memo_seen = st.setdefault("memoAdded", [])
-                for _p in _memo_new[:3]:          # 一条消息最多冒 3 个气泡，超出静默（防刷屏）
-                    if _p not in _memo_seen:
-                        _memo_seen.append(_p)
-        except Exception as e:
-            print("[memory] 自动写入失败：%s" % str(e)[:200], flush=True)
+        # Nori no longer extracts memories or routing rules. Hermes owns those
+        # durable AI state and applies it through its own memory/context system.
         agent_on = st.get("agentEnabled", True)
         # v2.0.105d：分流诊断日志（排查用户侧 agentEnabled 实际值）
         # v2.0.116 review：日志限 500 行轮转（防 /tmp 占满）
@@ -2039,16 +1962,14 @@ def _worker(task_id, task):
             if os.path.exists(_dbg) and os.path.getsize(_dbg) > 200_000:
                 os.rename(_dbg, _dbg + ".old")
             with open(_dbg, "a", encoding="utf-8") as _df:
-                _df.write(f"[{time.strftime('%H:%M:%S')}] agent_on={agent_on} is_agent={_is_agent_request(st['messages'])} "
-                          f"rule={agent_rules.match(last_user or '')} model={st.get('model','?')} provider={st.get('provider','?')} "
+                _df.write(f"[{time.strftime('%H:%M:%S')}] agent_on={agent_on} model={st.get('model','?')} provider={st.get('provider','?')} "
                           f"msgs={len(st['messages'])} text={str(last_user or '')[:60]} hermes_session={_use_hermes_session()}\n")
         except Exception:
             pass
-        is_agent_req = bool(agent_on and (_is_agent_request(st["messages"]) or agent_rules.match(last_user or "")))
-        # v3.9.55：TypeSafe 会话路由 —— 规则未命中时判「要干活 / 纯聊天」，
-        # 结果决定本次请求给模型的 system 契约（Agent 工具契约 vs 纯聊天契约）。
-        # fail-open：判定失败/超时/未配置 → agent（与改动前行为完全一致）。
-        _route, _route_src, _route_detail = _route_decision(st, is_agent_req, last_user)
+        # Hermes owns agent/tool routing. Nori always sends through the Hermes
+        # agent runtime and does not run a second keyword/model router.
+        is_agent_req = True
+        _route, _route_src, _route_detail = "agent", "hermes", {"ok": True}
         try:
             st["route"] = _route
             st["routeReason"] = _route_src
@@ -2111,11 +2032,13 @@ def _worker(task_id, task):
             # v3.4.10 X方案：不再带 X-Hermes-Session-Id！根因：Hermes 收到该头即用 state.db
             # 未净化原始会话覆盖外部 messages → 种子上一条 assistant 回复+工具/结果进上下文 → 复读。
             # 现改为去该头 + 发断种子净化历史（_build_hermes_messages），模型用净化上下文，不复读。
-            _amodel = hermes_upstream.effective_model()  # App 选中的 Hermes 模型；未选则 None→不带 model 覆盖
+            # Hermes 自身的 config.yaml 是 provider/model 唯一真源。不要把
+            # provider 内部模型 ID 当成 Hermes API 的 gateway alias 发过去。
+            _amodel = None
             # v3.5.2：净化历史先拼好（responses 路径要拆成 instructions + input）
             _amsgs = _build_hermes_messages(st, last_user, _route == "agent")
             if HERMES_PROTOCOL == "responses":
-                req_body = _hermes_responses_body(_amodel, st, _amsgs)
+                req_body = _hermes_responses_body(_amsgs)
             else:
                 req_body = {
                     "messages": _amsgs,
@@ -2124,11 +2047,7 @@ def _worker(task_id, task):
                 }
                 if _amodel is not None:
                     req_body["model"] = _amodel  # 未选中时不覆盖，Hermes 用自身配置模型
-                if st.get("provider"):
-                    req_body["provider"] = st["provider"]
-                else:
-                    req_body["provider"] = "deepseek"
-                req_body["model_options"] = _reasoning_options(st.get("reasoning"))   # v3.6.5 档位优先
+                # Hermes resolves provider, model, and reasoning from its config.
             # 注意：不再 update(session_headers) —— 去掉 X-Hermes-Session-Id，
             # Hermes 改走 api_server_openai_routes.py:476 的 conversation_messages[:-1]（我们发的净化历史）。
             full_headers = {"Authorization": "Bearer " + hermes_upstream.get_key(),  # 2026-10-07：同上，裸 HERMES_KEY 会 NameError
@@ -2155,7 +2074,7 @@ def _worker(task_id, task):
         # ============ 回退：现状（STREAM_HERMES_SESSION=0，不启用方案C） ============
         # v3.5.2：下面这条回退支路仍走 chat/completions（含 provider 直连/Ollama 直连），
         # 只有上面的 Agent 支路迁移到了 /v1/responses —— 生产 STREAM_HERMES_SESSION=1，走不到这里。
-        if agent_on and (_is_agent_request(st["messages"]) or agent_rules.match(last_user or "")):
+        if agent_on and _is_agent_request(st["messages"]):
             st["agent"] = True
             st["content"] = media_convert.convert_media_marks(_agent_loop(st["messages"], task))  # v2.0.130: MEDIA→图片
             st["status"] = "done"
@@ -2173,11 +2092,11 @@ def _worker(task_id, task):
                 "frequency_penalty": 0.7,
                 "presence_penalty": 0.3,
         }
-        _wamodel = hermes_upstream.effective_model()
+        # Hermes already resolves its configured provider/model; this gateway
+        # endpoint must not receive an internal provider model ID override.
+        _wamodel = None
         if _wamodel is not None:
             req_body["model"] = _wamodel  # 未选中时不覆盖，Hermes 用自身配置模型
-        if st.get("provider"):
-            req_body["provider"] = st["provider"]
         # 本地模型直连 Ollama（断网兜底）
         if st.get("provider") == "local":
             try:
@@ -2286,11 +2205,10 @@ def _hermes_stream_worker(task_id, task, req_body, headers, last_write, url=None
     _maybe_push_app_later(task_id, task)   # v3.6.1 延迟复检：内容没送达就补推
 
 
-def _hermes_responses_body(model, st, msgs):
+def _hermes_responses_body(msgs):
     """v3.5.2：把 chat/completions 的 messages 转成 Responses API 请求体。
 
-    model 为 App 经 POST /api/hermes/model 选中的模型 id；为 None 时不带 model
-    键，让 Hermes 用自身配置的模型（模型只认 Hermes 一处配置）。
+    不传 model/provider override，让 Hermes 使用自己的当前配置。
 
     首条 system 平移到 `instructions`（responses 路由把它当 ephemeral system prompt，与
     chat/completions 的等价），其余按序放进 `input` —— 路由取 input[:-1] 当历史、最后一条当
@@ -2306,13 +2224,9 @@ def _hermes_responses_body(model, st, msgs):
         "input": items,
         "stream": True,
         "store": False,   # 默认 true 会往 response_store.db 落条目，这里不需要
-        "provider": st.get("provider") or "deepseek",
     }
-    if model is not None:
-        body["model"] = model
     if sys_prompt:
         body["instructions"] = sys_prompt
-    body["model_options"] = _reasoning_options(st.get("reasoning"))   # v3.6.5 档位优先（只影响轻聊）
     return body
 
 
@@ -2638,35 +2552,17 @@ class StreamHandler(BaseHTTPRequestHandler):
         except Exception:
             return self._send(400, {"error": "bad json"})
 
-        # v3.9.80：App 的「一问一答（非流式）」出口。
-        # 根因（2026-09-25 取证）：App 侧三处（Siri「问轻聊」/ AI 翻译浮层 / 上下文自动压缩摘要）
-        # 一直在 POST 这个路径，而后端**从来没实现过** —— do_POST 一路落到函数末尾统一 404。
-        # NAS nginx access.log 实证：`Qingliao/524 POST /api/stream/chat` → 404（22 字节 = not found），
-        # 于是翻译浮层每次拍照都落「没拿到译文」卡（用户报的就是这条），
-        # Siri「问轻聊」必失败，上下文压缩摘要静默降级成本地压缩。
-        # 口径与 _ctx_summary_ask 一致：_agent_endpoint 精确路由 provider + 关思考链
-        # （翻译/摘要不需要推理；推理模型会把 max_tokens 花在 reasoning 上，App 侧 30s 超时扛不住）。
+        # Siri, translation, and image Q&A also use Hermes' configured model.
         if self.path == "/api/stream/chat":
             msgs = data.get("messages")
             if not msgs or not isinstance(msgs, list):
                 return self._send(400, {"error": "messages required"})
-            model = str(data.get("model") or "").strip()
-            provider = str(data.get("provider") or "").strip()
-            url, key, use_model = _agent_endpoint(model, provider)
-            if not url:
-                return self._send(500, {"error": "no upstream configured"})
             try:
-                max_tokens = int(data.get("max_tokens") or 2048)
+                max_tokens = max(64, min(8192, int(data.get("max_tokens") or 2048)))
             except Exception:
                 max_tokens = 2048
-            body = {"model": use_model or model or AGENT_MODEL,
-                    "messages": msgs,
-                    "stream": False,
-                    "max_tokens": max_tokens}
-            if provider.lower() not in ("local", "ollama"):
-                body["model_options"] = {"reasoning": {"enabled": False}}
             try:
-                j = _chat_once(body, url=url, key=key)
+                j = _hermes_chat_once(msgs, max_tokens=max_tokens, timeout=40)
             except Exception as e:
                 # 上游失败**不吞**：App 侧只会显示「没拿到译文」，真因留在这条 502 里
                 return self._send(502, {"error": "upstream failed: %s" % str(e)[:200]})

@@ -24,7 +24,9 @@ def _call_ai(prompt, timeout=60):
         if not url:
             return None
         body = json.dumps({
-            "model": hermes_upstream.effective_model() or "default",
+            # Hermes's API model is the gateway alias; the actual provider/model
+            # selection is read from Hermes config.yaml by Hermes itself.
+            "model": "hermes-agent",
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 2000,
         }).encode()

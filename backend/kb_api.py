@@ -332,6 +332,17 @@ class KBHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        # Nori's local RAG/knowledge-base feature is retired. Keep the module's
+        # file extraction helpers for internal document previews, but do not
+        # expose a second AI knowledge store beside Hermes.
+        if not self._check_auth():
+            self._send(401, {"error": "未授权"})
+            return
+        self._send(410, {"ok": False,
+                         "error": "Nori 本地知识库已停用，请使用 Hermes 原生能力。"})
+        return
+
+        # Legacy implementation retained below for rollback/migration only.
         if not self._check_auth():
             self._send(401, {"error": "未授权"})
             return
@@ -349,6 +360,14 @@ class KBHandler(BaseHTTPRequestHandler):
         self._send(404, {"error": "Not Found"})
 
     def do_POST(self):
+        if not self._check_auth():
+            self._send(401, {"error": "未授权"})
+            return
+        self._send(410, {"ok": False,
+                         "error": "Nori 本地知识库已停用，请使用 Hermes 原生能力。"})
+        return
+
+        # Legacy implementation retained below for rollback/migration only.
         if not self._check_auth():
             self._send(401, {"error": "未授权"})
             return

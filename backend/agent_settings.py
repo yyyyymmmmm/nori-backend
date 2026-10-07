@@ -14,9 +14,11 @@ DATA_DIR = os.environ.get("QL_DATA_DIR", os.path.join(os.path.dirname(BASE), "da
 SETTINGS_FILE = os.path.join(DATA_DIR, "agent_settings.json")
 
 DEFAULTS = {
-    "context_auto_compress": False,
+    "context_auto_compress": True,
     "context_threshold": 8000,
 }
+
+_ALLOWED = set(DEFAULTS)
 
 
 def get_settings():
@@ -32,6 +34,13 @@ def get_settings():
 
 
 def set_setting(key, value):
+    if key not in _ALLOWED:
+        return False
+    if key == "context_auto_compress" and not isinstance(value, bool):
+        return False
+    if key == "context_threshold":
+        if isinstance(value, bool) or not isinstance(value, int) or not 1000 <= value <= 64000:
+            return False
     try:
         settings = get_settings()
         settings[key] = value

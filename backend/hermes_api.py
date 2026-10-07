@@ -45,7 +45,10 @@
 """
 import json
 import os
+import re
 import urllib.parse
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler
 
 import hermes_upstream
@@ -53,6 +56,82 @@ import hermes_platforms
 import hermes_skills
 import hermes_oauth
 import agent_prefs
+
+
+def _hermes_custom_provider_entries():
+    """Read configured Hermes custom providers without returning their secrets."""
+    import hermes_inspect
+    ok, cfg = hermes_inspect.get_hermes_config()
+    if not ok or not isinstance(cfg, dict):
+        raise RuntimeError("无法读取 Hermes 配置：%s" % cfg)
+    raw = cfg.get("custom_providers") or []
+    if isinstance(raw, dict):
+        raw = [{"name": name, **(value if isinstance(value, dict) else {})}
+               for name, value in raw.items()]
+    if not isinstance(raw, list):
+        raise RuntimeError("Hermes custom_providers 格式无效")
+    return cfg, [dict(x) for x in raw if isinstance(x, dict)]
+
+
+def _provider_id(name):
+    name = str(name or "").strip()
+    return name if name.startswith("custom:") else "custom:" + name
+
+
+def _fetch_custom_models(provider):
+    """Fetch one Hermes custom provider's live models; fall back to configured model."""
+    name = str(provider.get("name") or "custom")
+    base = str(provider.get("base_url") or "").rstrip("/")
+    key = str(provider.get("api_key") or "")
+    models, error = [], None
+    if base:
+        endpoint = base + "/models" if base.endswith("/v1") else base + "/v1/models"
+        try:
+            req = urllib.request.Request(endpoint, headers={
+                "Authorization": "Bearer " + key} if key else {})
+            with urllib.request.urlopen(req, timeout=12) as response:
+                data = json.loads(response.read().decode("utf-8", "replace"))
+            models = hermes_upstream._parse_models_v1(data)
+            if not models:
+                error = "服务商未返回模型列表"
+        except urllib.error.HTTPError as exc:
+            error = "HTTP %d：无法读取模型列表" % exc.code
+        except Exception as exc:  # noqa: BLE001
+            error = "模型列表获取失败：%s" % str(exc)[:100]
+    else:
+        error = "Hermes 服务商缺少 base_url"
+    configured = str(provider.get("model") or "").strip()
+    if configured and not any(x["id"] == configured for x in models):
+        models.append({"id": configured, "name": configured})
+    return models, error
+
+
+def _hermes_model_groups():
+    """Build picker groups from Hermes config and each provider's live /v1/models."""
+    import hermes_inspect
+    cfg, providers = _hermes_custom_provider_entries()
+    selected_ok, selected = hermes_inspect.get_selected_hermes_model()
+    hidden = hermes_upstream.get_hidden_models()
+    groups, seen = [], set()
+    for provider in providers:
+        name = str(provider.get("name") or provider.get("id") or "custom")
+        pid = _provider_id(name)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        models, error = _fetch_custom_models(provider)
+        hidden_ids = set(hidden.get(pid, []))
+        models = [m for m in models if m["id"] not in hidden_ids]
+        for model in models:
+            model["selected"] = bool(selected_ok and selected
+                                     and model["id"] == selected["id"]
+                                     and pid == selected["provider"])
+        groups.append({"id": pid, "name": name, "models": models, "error": error})
+    if selected_ok and selected and selected["provider"] not in seen:
+        groups.append({"id": selected["provider"], "name": selected["provider"],
+                       "models": [{"id": selected["id"], "name": selected["id"],
+                                   "selected": True}], "error": None})
+    return groups
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -290,25 +369,39 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(405, {"error": "method not allowed"})
             return
         if self._is_models(path):
-            sel = hermes_upstream.get_selected()
-            out = []
-            for grp in hermes_upstream.get_all_models():
-                models = grp["models"]
-                for m in models:
-                    m["selected"] = (m["id"] == sel["model"]
-                                     and grp["id"] == sel["provider"])
-                out.append({"id": grp["id"], "name": grp["name"],
-                            "models": models, "error": grp["error"]})
-            self._send(200, {"providers": out})
+            try:
+                groups = _hermes_model_groups()
+                self._send(200, {"ok": True, "providers": groups})
+            except Exception as exc:  # noqa: BLE001
+                self._send(503, {"ok": False, "error": "读取 Hermes 模型失败：%s" % str(exc)[:160]})
             return
         if self._is_providers(path):
-            self._send(200, {"providers": hermes_upstream.get_providers()})
+            try:
+                cfg, configured = _hermes_custom_provider_entries()
+                selected = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
+                selected_provider = str(selected.get("provider") or "") if isinstance(selected, dict) else ""
+                providers = []
+                for item in configured:
+                    name = str(item.get("name") or item.get("id") or "custom")
+                    providers.append({"id": _provider_id(name), "name": name,
+                                     "has_key": bool(item.get("api_key")),
+                                     "is_default": _provider_id(name) == selected_provider,
+                                     "editable": True})
+                self._send(200, {"ok": True, "providers": providers})
+            except Exception as exc:  # noqa: BLE001
+                self._send(503, {"ok": False, "error": "读取 Hermes 服务商失败：%s" % str(exc)[:160]})
             return
         if self._is_platforms(path):
-            self._send(200, {"platforms": hermes_platforms.get_platforms()})
+            try:
+                self._send(200, {"platforms": hermes_platforms.get_platforms()})
+            except Exception as exc:  # noqa: BLE001
+                self._send(503, {"ok": False, "error": "读取 Hermes 平台失败：%s" % str(exc)[:160]})
             return
         if self._is_skills(path):
-            self._send(200, {"skills": hermes_skills.list_skills()})
+            try:
+                self._send(200, {"skills": hermes_skills.list_skills()})
+            except Exception as exc:  # noqa: BLE001
+                self._send(503, {"ok": False, "error": "读取 Hermes 技能失败：%s" % str(exc)[:160]})
             return
         if self._is_oauth_vendors(path):
             self._send(200, {"vendors": hermes_oauth.list_vendors()})
@@ -354,17 +447,27 @@ class Handler(BaseHTTPRequestHandler):
         if self._is_model(path):
             mid = str(body.get("model_id", "") or "")
             pid = str(body.get("provider", "") or "")
-            # 2026-10-07：切换必须写 Hermes 配置（之前只写后端自己的配置，两边脱节）
+            # Validate against Hermes's live model catalog, not Nori's unrelated gateway registry.
+            try:
+                groups = _hermes_model_groups()
+            except Exception as exc:  # noqa: BLE001
+                self._send(503, {"ok": False, "error": "无法读取 Hermes 模型：%s" % str(exc)[:160]})
+                return
+            if not any(g["id"] == pid and any(m["id"] == mid for m in g["models"])
+                       for g in groups):
+                self._send(400, {"ok": False, "error": "该模型不在 Hermes 当前服务商的实时模型列表中"})
+                return
             import hermes_inspect
             ok, msg = hermes_inspect.set_hermes_model(mid, pid or None)
             if not ok:
                 self._send(200, {"ok": False, "error": "切换 Hermes 模型失败: %s" % msg})
                 return
-            if not hermes_upstream.save_selected_model(mid, pid or None)[0]:
-                self._send(200, {"ok": False, "error": "Hermes 已切换，但后端兼容配置未同步，请重试确认"})
+            restarted, restart_msg = hermes_inspect.restart_hermes_container()
+            if not restarted:
+                self._send(200, {"ok": False, "saved": True,
+                                 "error": "Hermes 配置已保存，但容器重启失败：%s" % restart_msg})
                 return
-            # Keep the compatibility cache aligned with Hermes before confirming success.
-            self._send(200, {"ok": True})
+            self._send(200, {"ok": True, "restart": "completed"})
             return
         if self._is_models_hide(path):
             pid = str(body.get("provider", "") or "")
@@ -377,12 +480,52 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True})
             return
         if self._is_providers(path):
-            ok, payload = hermes_upstream.add_provider(
-                body.get("name"), body.get("url"), body.get("key"))
-            if not ok:
-                self._send(200, {"ok": False, "error": payload})
+            name = str(body.get("name") or "").strip()
+            url = str(body.get("url") or "").strip().rstrip("/")
+            key = str(body.get("key") or "").strip()
+            if not name or not re.fullmatch(r"[\w.-]{1,80}", name, re.UNICODE):
+                self._send(400, {"ok": False, "error": "名称只能包含字母、数字、中文、点、下划线或短横线"})
                 return
-            self._send(200, {"ok": True, "provider": payload})
+            if not url.startswith(("https://", "http://")):
+                self._send(400, {"ok": False, "error": "地址必须以 http:// 或 https:// 开头"})
+                return
+            base = hermes_upstream._normalize_url(url)
+            model_url = base + "/models" if base.endswith("/v1") else base + "/v1/models"
+            try:
+                req = urllib.request.Request(model_url, headers={
+                    "Authorization": "Bearer " + key} if key else {})
+                with urllib.request.urlopen(req, timeout=12) as response:
+                    model_data = json.loads(response.read().decode("utf-8", "replace"))
+                discovered = hermes_upstream._parse_models_v1(model_data)
+            except Exception as exc:  # noqa: BLE001
+                self._send(200, {"ok": False, "error": "连接或获取模型失败：%s" % str(exc)[:140]})
+                return
+            if not discovered:
+                self._send(200, {"ok": False, "error": "服务商未返回可用模型，未保存配置"})
+                return
+            try:
+                import hermes_inspect
+                cfg, configured = _hermes_custom_provider_entries()
+                if any(str(x.get("name") or "") == name for x in configured):
+                    self._send(409, {"ok": False, "error": "该 Hermes 服务商名称已存在"})
+                    return
+                configured.append({"name": name, "base_url": base, "api_key": key,
+                                   "model": discovered[0]["id"],
+                                   "api_mode": "chat_completions"})
+                saved, detail = hermes_inspect.update_hermes_config("custom_providers", configured)
+                if not saved:
+                    self._send(500, {"ok": False, "error": "写入 Hermes 配置失败：%s" % detail[:140]})
+                    return
+                restarted, restart_msg = hermes_inspect.restart_hermes_container()
+                if not restarted:
+                    self._send(200, {"ok": False, "saved": True,
+                                     "error": "配置已保存但 Hermes 重启失败：%s" % restart_msg})
+                    return
+            except Exception as exc:  # noqa: BLE001
+                self._send(503, {"ok": False, "error": "写入 Hermes 服务商失败：%s" % str(exc)[:140]})
+                return
+            self._send(200, {"ok": True, "provider": {"id": _provider_id(name),
+                            "name": name, "has_key": bool(key), "editable": True}})
             return
         if self._is_platforms(path):
             pid = str(body.get("platform", "") or "")
@@ -391,8 +534,9 @@ class Handler(BaseHTTPRequestHandler):
             if not ok:
                 self._send(200, {"ok": False, "error": err})
                 return
-            self._send(200, {"ok": True,
-                             "restart": "triggered" if restarted else "failed"})
+            self._send(200, {"ok": bool(restarted), "saved": True,
+                             "restart": "triggered" if restarted else "failed",
+                             "error": None if restarted else "Hermes 容器重启失败，配置已保存但尚未生效"})
             return
         if self._is_skills(path):
             sid = str(body.get("skill_id", "") or "")
@@ -401,7 +545,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, {"ok": False, "error": err})
                 return
             if not restarted:
-                self._send(200, {"ok": False, "error": "技能配置已保存，但 Hermes 网关重启失败",
+                self._send(200, {"ok": False, "error": err or "Hermes 重启失败",
                                  "restart": "failed", "saved": True})
                 return
             self._send(200, {"ok": True,
@@ -478,9 +622,32 @@ class Handler(BaseHTTPRequestHandler):
             body = {}
         if self._is_provider_item(path):
             pid = self._provider_item_id(path)
-            ok, err = hermes_upstream.delete_provider(pid)
-            self._send(200, {"ok": True} if ok else
-                       {"ok": False, "error": err})
+            if pid.startswith("custom:"):
+                name = pid[len("custom:"):]
+                try:
+                    import hermes_inspect
+                    cfg, configured = _hermes_custom_provider_entries()
+                    current = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
+                    if isinstance(current, dict) and current.get("provider") == pid:
+                        self._send(409, {"ok": False, "error": "不能删除当前正在使用的服务商；先切换模型"})
+                        return
+                    remaining = [x for x in configured if str(x.get("name") or "") != name]
+                    if len(remaining) == len(configured):
+                        self._send(404, {"ok": False, "error": "Hermes 服务商不存在"})
+                        return
+                    ok, detail = hermes_inspect.update_hermes_config("custom_providers", remaining)
+                    if not ok:
+                        self._send(500, {"ok": False, "error": detail})
+                        return
+                    restarted, detail = hermes_inspect.restart_hermes_container()
+                    self._send(200, {"ok": restarted, "saved": True,
+                                     "error": None if restarted else "配置已保存但重启失败：" + detail})
+                except Exception as exc:  # noqa: BLE001
+                    self._send(503, {"ok": False, "error": str(exc)[:160]})
+            else:
+                ok, err = hermes_upstream.delete_provider(pid)
+                self._send(200, {"ok": True} if ok else
+                           {"ok": False, "error": err})
             return
         if self._is_artifacts(path):
             if agent_prefs.delete_artifact(body.get("id")):

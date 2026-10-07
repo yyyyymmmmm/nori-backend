@@ -359,7 +359,9 @@ def _generate(prompt, limit):
         return []
     key = hermes_upstream.get_key()
     url = base.rstrip("/") + "/v1/chat/completions"
-    model = os.environ.get("QL_FEED_MODEL") or "default"
+    # The upstream is Hermes's OpenAI-compatible gateway. The selected provider
+    # model lives in Hermes config.yaml; this endpoint accepts the gateway alias.
+    model = os.environ.get("QL_FEED_MODEL") or "hermes-agent"
     body = {
         "model": model,
         "messages": [
@@ -390,8 +392,10 @@ def _regen_worker(prompt, limit):
             # 2026-10-07：从新闻原文提取配图
             _enrich_images(units)
             _write_cache(prompt, units)
-    except Exception:
-        pass
+    except Exception as exc:
+        # Keep provider failures visible in container logs; otherwise the UI's
+        # empty state looks like a connection problem even when generation failed.
+        print("[feed] generation failed: %s" % str(exc)[:200], flush=True)
     finally:
         with _gen_lock:
             _gen_running = False
@@ -489,7 +493,10 @@ class FeedHandler(BaseHTTPRequestHandler):
             return
         # 过期/缺失/换了提示词 → 后台再生，本次先回旧数据或 []（iOS 8s 超时内必须返回）
         _kick_regen(prompt, limit)
-        units = all_units if same_prompt else []
+        # Keep the existing feed visible while a changed prompt is regenerated.
+        # A prompt change should not turn a healthy service into a misleading
+        # "not connected" empty state.
+        units = all_units
         page = (units or [])[offset:offset + limit]
         if want_paged:
             self._send(200, {"units": page, "offset": offset,

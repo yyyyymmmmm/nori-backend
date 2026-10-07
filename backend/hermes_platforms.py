@@ -18,6 +18,7 @@ App「对接第三方」页的后端：
 import threading
 
 import channel_api
+import hermes_inspect
 
 _lock = threading.Lock()
 
@@ -89,30 +90,16 @@ def _unquote(v):
 
 
 def _read_raw():
-    """读 platforms 段 → {platform_id: {key: value}}；文件缺失返回 {}。"""
-    try:
-        with open(channel_api.PROFILE_CFG, encoding="utf-8") as f:
-            lines = f.read().splitlines()
-    except OSError:
-        return {}
-    blk = channel_api._find_top_block(lines, "platforms:")
-    if not blk:
-        return {}
-    start, end = blk
-    out = {}
-    cur = None
-    for ln in lines[start + 1:end]:
-        s = ln.strip()
-        if not s or s.startswith("#"):
-            continue
-        indent = len(ln) - len(ln.lstrip(" "))
-        if indent == 2 and s.endswith(":"):
-            cur = s[:-1].strip()
-            out[cur] = {}
-        elif cur is not None and indent >= 4 and ":" in s:
-            k, v = s.split(":", 1)
-            out[cur][k.strip()] = _unquote(v)
-    return out
+    """Read the platforms block from Hermes's live config, never a host-path guess."""
+    ok, config = hermes_inspect.get_hermes_config()
+    if not ok or not isinstance(config, dict):
+        raise RuntimeError("无法读取 Hermes 正在使用的 config.yaml: %s" % config)
+    raw = config.get("platforms") or {}
+    if not isinstance(raw, dict):
+        raise RuntimeError("Hermes config 的 platforms 不是字典")
+    return {str(pid): ({str(k): str(v) for k, v in values.items()}
+                       if isinstance(values, dict) else {})
+            for pid, values in raw.items()}
 
 
 def get_platforms():
@@ -172,23 +159,21 @@ def _ensure_subsection(lines, pid):
 
 
 def _write_platform(pid, enabled, kv):
-    """写 platforms.<pid> 段：enabled + kv 键；保留段内其它键。"""
-    with open(channel_api.PROFILE_CFG, encoding="utf-8") as f:
-        lines = f.read().splitlines()
-    lines, s, e = _ensure_subsection(lines, pid)
-    managed = {"enabled"} | set(kv.keys())
-    body = []
-    for ln in lines[s + 1:e]:
-        t = ln.strip()
-        if t and not t.startswith("#") and ":" in t:
-            if t.split(":", 1)[0].strip() in managed:
-                continue  # 删旧值，稍后统一写
-        body.append(ln)
-    new_keys = ["    enabled: %s" % ("true" if enabled else "false")]
-    for k, v in kv.items():
-        new_keys.append("    %s: %s" % (k, _yaml_quote(v)))
-    out = lines[:s + 1] + new_keys + body + lines[e:]
-    channel_api._write_lines(out)
+    """Patch one platform while preserving unrelated platform settings/comments."""
+    ok, config = hermes_inspect.get_hermes_config()
+    if not ok or not isinstance(config, dict):
+        raise RuntimeError("无法读取 Hermes 正在使用的 config.yaml: %s" % config)
+    raw = config.get("platforms") or {}
+    if not isinstance(raw, dict):
+        raise RuntimeError("Hermes config 的 platforms 不是字典")
+    raw = dict(raw)
+    current = dict(raw.get(pid) or {})
+    current["enabled"] = bool(enabled)
+    current.update(kv)
+    raw[pid] = current
+    ok, detail = hermes_inspect.update_hermes_config("platforms", raw)
+    if not ok:
+        raise RuntimeError(detail)
 
 
 def set_platform(pid, enabled, config):

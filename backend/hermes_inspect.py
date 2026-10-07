@@ -14,7 +14,8 @@ import socket
 import urllib.parse
 
 _DOCKER_SOCK = "/var/run/docker.sock"
-_HERMES_CONTAINER = os.environ.get("HERMES_CONTAINER", "")
+_HERMES_CONTAINER = (os.environ.get("QL_HERMES_CONTAINER")
+                     or os.environ.get("HERMES_CONTAINER", ""))
 
 
 def _docker_api(method, path, body=None):
@@ -47,22 +48,34 @@ def _docker_api(method, path, body=None):
 
     try:
         header_end = resp.index(b"\r\n\r\n")
-        header = resp[:header_end].decode("utf-8", "replace")
+        header = resp[:header_end].decode("iso-8859-1", "replace")
+        header_fields = {}
+        for line in header.split("\r\n")[1:]:
+            if ":" in line:
+                key, value = line.split(":", 1)
+                header_fields[key.strip().lower()] = value.strip().lower()
         body_bytes = resp[header_end + 4:]
         status = int(header.split(" ", 2)[1])
         # 去 chunked 编码
-        if "Transfer-Encoding: chunked" in header:
-            out = b""
+        if "chunked" in header_fields.get("transfer-encoding", ""):
+            out = bytearray()
             i = 0
             while True:
                 j = body_bytes.index(b"\r\n", i)
-                size = int(body_bytes[i:j].decode().strip(), 16)
+                size_line = body_bytes[i:j].split(b";", 1)[0].strip()
+                size = int(size_line, 16)
                 if size == 0:
                     break
                 i = j + 2
-                out += body_bytes[i:i + size]
+                if i + size + 2 > len(body_bytes):
+                    raise ValueError("incomplete chunked response")
+                out.extend(body_bytes[i:i + size])
                 i += size + 2
-            body_bytes = out
+            body_bytes = bytes(out)
+        # Docker exec start returns a multiplexed binary stream. Preserve its
+        # frame headers as bytes; UTF-8 replacement corrupts non-ASCII lengths.
+        if "application/vnd.docker.raw-stream" in header_fields.get("content-type", ""):
+            return status, body_bytes
         text = body_bytes.decode("utf-8", "replace")
         try:
             return status, json.loads(text)
@@ -208,6 +221,69 @@ def get_hermes_config():
     return False, "config not found"
 
 
+def update_hermes_config(section, value, merge=False):
+    """Atomically update one top-level Hermes YAML section in the live container.
+
+    Uses ruamel.yaml's round-trip mode so comments, ordering, and unrelated Hermes
+    settings survive a connection edit. The NAS Hermes image already ships ruamel.
+    The live container is the only config source; never fall back to a Nori-side copy.
+    """
+    import base64
+    section = str(section or "").strip()
+    if not section or not section.replace("_", "").isalnum():
+        return False, "invalid config section"
+    payload = base64.b64encode(json.dumps(value, ensure_ascii=False).encode("utf-8")).decode("ascii")
+    script = "\n".join([
+        "import base64, json, os, stat, tempfile, sys",
+        "from ruamel.yaml import YAML",
+        'path = "/home/agent/.hermes/config.yaml"',
+        'section = ' + json.dumps(section),
+        'merge = ' + ("True" if merge else "False"),
+        'value = json.loads(base64.b64decode("' + payload + '").decode("utf-8"))',
+        "yaml = YAML(typ='rt')",
+        "yaml.preserve_quotes = True",
+        "with open(path, 'r', encoding='utf-8') as f:",
+        "    data = yaml.load(f) or {}",
+        "if not isinstance(data, dict): raise ValueError('Hermes config root is not a mapping')",
+        "if merge and isinstance(data.get(section), dict) and isinstance(value, dict):",
+        "    data[section].update(value)",
+        "else:",
+        "    data[section] = value",
+        "st = os.stat(path)",
+        "fd, tmp = tempfile.mkstemp(prefix='.config-', suffix='.yaml.tmp', dir=os.path.dirname(path))",
+        "try:",
+        "    with os.fdopen(fd, 'w', encoding='utf-8') as f:",
+        "        yaml.dump(data, f)",
+        "        f.flush(); os.fsync(f.fileno())",
+        "    os.chmod(tmp, stat.S_IMODE(st.st_mode)); os.chown(tmp, st.st_uid, st.st_gid)",
+        "    os.replace(tmp, path)",
+        "    print('ok')",
+        "finally:",
+        "    if os.path.exists(tmp): os.unlink(tmp)",
+    ])
+    script_b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    ok, output = exec_in_hermes("echo '%s' | base64 -d | python3" % script_b64)
+    if not ok or output.strip() != "ok":
+        return False, output.strip()[:200] or "Hermes config write failed"
+    check_ok, config = get_hermes_config()
+    actual = config.get(section) if check_ok and isinstance(config, dict) else None
+    matches = (isinstance(actual, dict) and all(actual.get(k) == v for k, v in value.items())) \
+        if merge and isinstance(value, dict) else actual == value
+    if not check_ok or not isinstance(config, dict) or not matches:
+        return False, "Hermes config write verification failed"
+    return True, "ok"
+
+
+def restart_hermes_container():
+    """Restart the discovered Hermes container via the mounted Docker socket."""
+    cid = find_hermes_container()
+    if not cid:
+        return False, "Hermes 容器未找到"
+    code, result = _docker_api(
+        "POST", "/containers/%s/restart?t=10" % urllib.parse.quote(str(cid), safe=""))
+    return (True, "restarted") if code in (200, 204) else (False, str(result or code)[:200])
+
+
 def get_hermes_models():
     """从 Hermes 配置提取模型列表。返回 [{id, name, provider}]。
     2026-10-07 用户实测（c1e88aa）：
@@ -342,6 +418,42 @@ def get_hermes_memory():
     return mem
 
 
+def list_hermes_skills():
+    """Return Hermes-installed skill metadata from the live container."""
+    import base64
+    script = "\n".join([
+        "import json, pathlib, re",
+        "root = pathlib.Path('/home/agent/.hermes/skills')",
+        "out = []",
+        "if root.exists():",
+        "  for file in sorted(root.rglob('SKILL.md')):",
+        "    try:",
+        "      text = file.read_text(encoding='utf-8')[:4096]",
+        "    except Exception:",
+        "      continue",
+        "    name = file.parent.name; description = ''",
+        "    match = re.match(r'\\s*---\\s*\\n(.*?)\\n\\s*---\\s*', text, re.S)",
+        "    if match:",
+        "      for line in match.group(1).splitlines():",
+        "        if ':' not in line: continue",
+        "        key, value = line.split(':', 1)",
+        "        value = value.strip().strip('\\\"\\\'')",
+        "        if key.strip().lower() == 'name' and value: name = value",
+        "        elif key.strip().lower() == 'description' and value and not description: description = value",
+        "    out.append({'id': file.parent.name, 'name': name, 'description': description})",
+        "print(json.dumps(out, ensure_ascii=False))",
+    ])
+    encoded = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    ok, output = exec_in_hermes("echo '%s' | base64 -d | python3" % encoded)
+    if not ok:
+        return False, output
+    try:
+        data = json.loads(output.strip())
+        return True, data if isinstance(data, list) else []
+    except Exception as exc:  # noqa: BLE001
+        return False, "skill metadata parse failed: %s" % str(exc)[:100]
+
+
 def append_hermes_memory(text):
     """往 Hermes 的 MEMORY.md 追加一条记忆。返回 (ok, msg)。"""
     # 2026-10-07：记忆写闭环 —— App 端新增记忆时同步写 Hermes
@@ -369,36 +481,15 @@ def append_hermes_memory(text):
 def set_hermes_model(model_id, provider=None):
     """切换 Hermes 配置中的模型。返回 (ok, msg)。
     2026-10-07：修复模型切换只写后端不写 Hermes 的问题。"""
-    import base64
     model_id = str(model_id or "").strip()
     provider = str(provider or "").strip() or None
     if not model_id:
         return False, "model_id required"
-    # 用 Python 在容器内改 YAML（避免 sed 转义问题）
-    script = "\n".join([
-        "import yaml, sys",
-        'p = "/home/agent/.hermes/config.yaml"',
-        "try:",
-        "    d = yaml.safe_load(open(p)) or {}",
-        "except Exception as e:",
-        '    print("read fail: %s" % e); sys.exit(1)',
-        'm = d.get("model")',
-        "if not isinstance(m, dict):",
-        "    m = {}",
-        '    d["model"] = m',
-        'm["default"] = ' + json.dumps(model_id, ensure_ascii=False),
-        *(['m["provider"] = ' + json.dumps(provider, ensure_ascii=False)] if provider else []),
-        "try:",
-        '    yaml.safe_dump(d, open(p, "w"), allow_unicode=True)',
-        '    print("ok")',
-        "except Exception as e:",
-        '    print("write fail: %s" % e); sys.exit(1)',
-        "",
-    ])
-    b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
-    cmd = "echo '%s' | base64 -d | python3" % b64
-    ok, out = exec_in_hermes(cmd)
-    if not ok or "ok" not in out:
+    model = {"default": model_id}
+    if provider:
+        model["provider"] = provider
+    ok, out = update_hermes_config("model", model, merge=True)
+    if not ok:
         return False, out[:200]
     verify_ok, selected = get_selected_hermes_model()
     if not verify_ok or selected["id"] != model_id or (provider and selected["provider"] != provider):

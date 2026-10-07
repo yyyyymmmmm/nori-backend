@@ -73,7 +73,8 @@ class Handler(BaseHTTPRequestHandler):
                         })
                     self.send_json(transformed)
             except Exception as e:
-                self.send_json([])
+                print("[cron] 读取 Hermes 定时任务失败：%s" % str(e)[:200], flush=True)
+                self.send_json({'error': '读取 Hermes 定时任务失败：%s' % str(e)[:160]}, 502)
         elif self.path == '/api/cron/logs':
             try:
                 req = urllib.request.Request(f"{hermes_upstream.get_base_url()}/api/jobs", headers={
@@ -95,7 +96,8 @@ class Handler(BaseHTTPRequestHandler):
                     logs.sort(key=lambda x: x.get('time', ''), reverse=True)
                     self.send_json(logs[:50])
             except Exception as e:
-                self.send_json([])
+                print("[cron] 读取 Hermes 定时日志失败：%s" % str(e)[:200], flush=True)
+                self.send_json({'error': '读取 Hermes 定时日志失败：%s' % str(e)[:160]}, 502)
         else:
             self.send_error(404)
 

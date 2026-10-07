@@ -15,6 +15,8 @@ import time
 
 MEMORY_PATH = os.path.join(os.environ.get("QL_DATA_DIR", "/volume1/docker/hermes/微信文件/轻聊web/data"),"memory.json")
 MAX_ENTRIES = 50
+STATUSES = ("active", "pending", "stale")
+META_PATH = MEMORY_PATH + ".meta.json"
 
 # v3.0.6 review fix：记忆 JSON 高并发读写（每条流式消息 inject→add_entry），
 # 加全局锁 + 原子写（tmp+os.replace+fsync），防丢条目/写一半损坏
@@ -93,7 +95,12 @@ def delete_entry(text):
         entries = _load()
         if text in entries:
             entries.remove(text)
-            _save(entries)
+            if not _save(entries):
+                return False
+            statuses = _load_statuses()
+            if text in statuses:
+                statuses.pop(text, None)
+                _save_statuses(statuses)
             return True
         return False
 
@@ -117,9 +124,80 @@ def update_entry(old, new):
             return True
         if n in entries:
             entries.pop(i)
-            return _save(entries)
+            if not _save(entries):
+                return False
+            statuses = _load_statuses()
+            old_status = statuses.pop(o, None)
+            if old_status and n not in statuses:
+                statuses[n] = old_status
+                _save_statuses(statuses)
+            return True
         entries[i] = n
-        return _save(entries)
+        if not _save(entries):
+            return False
+        statuses = _load_statuses()
+        old_status = statuses.pop(o, None)
+        if old_status:
+            statuses[n] = old_status
+            _save_statuses(statuses)
+        return True
+
+
+def _load_statuses():
+    try:
+        with open(META_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()
+                    if v in STATUSES and k in _load()}
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+    return {}
+
+
+def _save_statuses(statuses):
+    tmp = None
+    try:
+        os.makedirs(os.path.dirname(META_PATH), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(META_PATH), suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(statuses, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, META_PATH)
+        return True
+    except Exception as e:
+        print("[memory] 状态保存失败：%s" % e, flush=True)
+        try:
+            if tmp and os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def set_status(text, status):
+    text, status = (text or "").strip(), str(status or "").strip()
+    if status not in STATUSES:
+        return False
+    with _lock:
+        entries = _load()
+        if text not in entries:
+            return False
+        statuses = _load_statuses()
+        if status == "active":
+            statuses.pop(text, None)
+        else:
+            statuses[text] = status
+        return _save_statuses(statuses)
+
+
+def list_items():
+    with _lock:
+        entries = [str(x).strip() for x in _load() if str(x).strip()]
+        statuses = _load_statuses()
+        return [{"text": text, "status": statuses.get(text, "active"),
+                 "source": "local"} for text in entries]
 
 
 # 记忆意图检测（记住/我是/我喜欢/别忘了…）
@@ -137,7 +215,7 @@ def _last_user(messages):
     return ""
 
 
-def check_and_save(user_text):
+def check_and_save(user_text, session_id=""):
     """检测用户消息的记忆意图 → 提取句子存入；返回新存条目"""
     t = str(user_text)
     saved = []

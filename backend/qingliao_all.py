@@ -70,21 +70,7 @@ def main():
     except Exception as e:
         print(f"[listen] router on {ROUTER_HOST}:{ROUTER_PORT} FAILED: {e}（跳过）", flush=True)
 
-    # 主动建议引擎
-    try:
-        import suggest_engine
-        suggest_engine.start_engine()
-        print("[engine] suggest_engine started", flush=True)
-    except Exception as e:
-        print(f"[engine] suggest_engine failed: {e}", flush=True)
-
-    # v4.0.11 主动型 Agent 中枢（决策层 + 事件源 + 目标追踪 + 打扰预算）
-    try:
-        import proactive_agent
-        proactive_agent.start_engine()
-        print("[engine] proactive_agent started", flush=True)
-    except Exception as e:
-        print(f"[engine] proactive_agent failed: {e}", flush=True)
+    # Background AI schedules and proactive work are owned by Hermes cron.
 
     print(f"[ready] all {len(servers)} services running", flush=True)
     try:
