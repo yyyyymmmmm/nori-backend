@@ -192,7 +192,17 @@ def set_platform(pid, enabled, config):
         # 停用：只关 enabled，保留既有配置
     else:
         if enabled:
-            missing = [f for f in p["needs"] if not str(config.get(f, "")).strip()]
+            # App 不会回读并回传保存过的密钥。允许已配置的平台直接启用，
+            # 只在“新配置 + Hermes 当前配置”都缺字段时才拒绝。
+            try:
+                existing = _read_raw().get(pid, {})
+            except Exception as exc:  # noqa: BLE001
+                return False, "读取 Hermes 平台配置失败：%s" % str(exc)[:120], False
+            missing = [
+                f for f in p["needs"]
+                if not str(config.get(f, "")).strip()
+                and not str(existing.get(_cfg_key(p, f), "")).strip()
+            ]
             if missing:
                 return False, "缺少必填配置：%s" % "、".join(missing), False
     kv = {}
@@ -209,4 +219,6 @@ def set_platform(pid, enabled, config):
         except Exception as e:  # noqa: BLE001
             return False, "写入 Hermes 配置失败：%s" % str(e)[:120], False
     restarted = channel_api._restart_gateway()
-    return True, "", restarted
+    if not restarted:
+        return True, "配置已保存，但 Hermes 网关重启失败，尚未生效", False
+    return True, "", True
