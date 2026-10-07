@@ -14,6 +14,7 @@ GET /api/feed/units?prompt=...&limit=6&offset=0&paged=1&refresh=1
 图片：从 bodyMarkdown 里的真实新闻链接抓 og:image，不编造；抓不到就 null。
 """
 import hashlib
+import glob
 import json
 import os
 import re
@@ -24,8 +25,15 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 
-CACHE_FILE = "/tmp/qingliao_feed_cache.json"
-HISTORY_FILE = os.path.join(os.path.dirname(CACHE_FILE), "qingliao_feed_history.json")
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.environ.get("QL_DATA_DIR") or os.path.join(os.path.dirname(_BASE_DIR), "data")
+CACHE_FILE = os.path.join(DATA_DIR, "feed_cache.json")
+HISTORY_FILE = os.path.join(DATA_DIR, "feed_history.json")
+# The previous release wrote both files under /tmp. Promote them to QL_DATA_DIR
+# the first time the new code reads the feed, before a later container restart
+# can discard them.
+LEGACY_CACHE_FILE = "/tmp/qingliao_feed_cache.json"
+LEGACY_HISTORY_FILE = "/tmp/qingliao_feed_history.json"
 HISTORY_MAX = 200  # 最多保留 200 条历史
 CACHE_TTL = 6 * 3600          # 动态 6 小时一刷
 DEFAULT_PROMPT = "我的兴趣动态版块，围绕三块内容：科技圈的新动态、AI 圈的进展、好玩的开源项目。"
@@ -35,6 +43,7 @@ LLM_TIMEOUT = 90              # 后台线程跑，不占 iOS 的 8s 超时
 
 _gen_lock = threading.Lock()
 _gen_running = False
+_history_lock = threading.RLock()
 
 _JSON_ARR_RE = re.compile(r"\[.*\]", re.S)
 _CATS = ("tech", "ai", "oss")
@@ -165,9 +174,9 @@ def _normalize_units(raw):
         dt = _parse_time(r.get("publishedAt"))
         if dt is None or dt > now + timedelta(minutes=5) or dt < now - timedelta(days=14):
             dt = now - timedelta(hours=2 * i)  # 坏时间 → 按序号倒排兜底
-        uid = str(r.get("id") or "").strip()
-        if not uid:
-            uid = "feed-%s" % hashlib.md5(title.encode("utf-8")).hexdigest()[:10]
+        # 模型常按 prompt 把每批 ID 重置成 feed-1 ... feed-6，不能信任模型 ID。
+        # 同一真实链接跨批次保持同一 ID；无链接时按标题+正文指纹区分不同内容。
+        uid = _story_id(title, body)
         img = r.get("imageURL")
         if not isinstance(img, str) or not img.startswith(("http://", "https://")):
             img = None
@@ -198,69 +207,148 @@ def _normalize_units(raw):
     return uniq
 
 
+def _story_id(title, body):
+    url = _extract_first_url(body)
+    if url:
+        try:
+            parsed = urllib.parse.urlsplit(url.rstrip(".,，。;；!?！？"))
+            host = (parsed.hostname or "").lower()
+            if host.startswith("www."):
+                host = host[4:]
+            port = ":%d" % parsed.port if parsed.port else ""
+            path = re.sub(r"/{2,}", "/", parsed.path or "/").rstrip("/") or "/"
+            query = urllib.parse.urlencode(sorted(
+                (k, v) for k, v in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+                if not k.lower().startswith("utm_") and k.lower() not in
+                {"fbclid", "gclid", "ref", "source"}))
+            identity = "url:%s" % urllib.parse.urlunsplit(
+                (parsed.scheme.lower() or "https", host + port, path, query, ""))
+        except Exception:
+            identity = "url:" + url.strip().lower()
+    else:
+        compact = lambda value: re.sub(r"\s+", " ", value).strip().casefold()
+        identity = "text:%s\n%s" % (compact(title), compact(body))
+    return "feed-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+
+
 def _read_history():
-    """读资讯历史（新→旧排序）。"""
+    """读资讯历史，并把旧 /tmp 历史和旧版六条缓存幂等迁入持久目录。"""
+    with _history_lock:
+        history = _load_history_file()
+        legacy = _read_json_list(LEGACY_HISTORY_FILE)
+        for path in glob.glob(os.path.join(DATA_DIR, "feed_legacy_history_*.json")):
+            legacy.extend(_read_json_list(path))
+        cache = _read_cache()
+        legacy_cache_units = []
+        for path in glob.glob(os.path.join(DATA_DIR, "feed_legacy_cache_*.json")):
+            legacy_cache_units.extend(_read_json_object(path).get("units", []))
+        merged = _merge_history(history, legacy, legacy_cache_units,
+                                (cache or {}).get("units", []))
+        if merged != history:
+            _save_history(merged)
+        return merged
+
+
+def _read_json_list(path):
     try:
-        if os.path.exists(HISTORY_FILE):
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                h = json.load(f)
-                if isinstance(h, list):
-                    return h
-    except Exception:
-        pass
-    return []
+        with open(path, "r", encoding="utf-8") as f:
+            value = json.load(f)
+        return value if isinstance(value, list) else []
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+
+
+def _read_json_object(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            value = json.load(f)
+        return value if isinstance(value, dict) else {}
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+
+
+def _load_history_file():
+    return _read_json_list(HISTORY_FILE)
+
+
+def _merge_history(*batches):
+    by_id = {}
+    for batch in batches:
+        for unit in batch or []:
+            if not isinstance(unit, dict):
+                continue
+            uid = str(unit.get("id") or "").strip()
+            if uid and uid not in by_id:
+                by_id[uid] = unit
+    def sort_key(unit):
+        dt = _parse_time(unit.get("publishedAt"))
+        return dt.timestamp() if dt else 0
+    return sorted(by_id.values(), key=sort_key, reverse=True)[:HISTORY_MAX]
+
+
+def _save_history(history):
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = HISTORY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, HISTORY_FILE)
+        return True
+    except OSError as exc:
+        print("[feed] save persistent history failed: %s" % exc, flush=True)
+        return False
 
 
 def _append_history(new_units):
-    """新资讯追加到历史头部，去重，截断到 HISTORY_MAX。"""
-    if not new_units:
-        return
-    hist = _read_history()
-    seen = {u.get("id") for u in hist if isinstance(u, dict)}
-    added = 0
-    for u in new_units:
-        if not isinstance(u, dict):
-            continue
-        uid = u.get("id")
-        if uid and uid not in seen:
-            hist.insert(added, u)
-            seen.add(uid)
-            added += 1
-    # 截断
-    if len(hist) > HISTORY_MAX:
-        hist = hist[:HISTORY_MAX]
-    try:
-        tmp = HISTORY_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(hist, f, ensure_ascii=False)
-        os.replace(tmp, HISTORY_FILE)
-    except Exception:
-        pass
+    """把旧缓存、旧历史和新批次合并后原子落到持久目录，按内容 ID 去重。"""
+    with _history_lock:
+        cache = _read_cache()
+        legacy = _read_json_list(LEGACY_HISTORY_FILE)
+        legacy_cache_units = []
+        for path in glob.glob(os.path.join(DATA_DIR, "feed_legacy_history_*.json")):
+            legacy.extend(_read_json_list(path))
+        for path in glob.glob(os.path.join(DATA_DIR, "feed_legacy_cache_*.json")):
+            legacy_cache_units.extend(_read_json_object(path).get("units", []))
+        hist = _merge_history(_load_history_file(), legacy, legacy_cache_units,
+                              (cache or {}).get("units", []), new_units)
+        _save_history(hist)
 
 
 def _read_cache():
-    try:
-        if os.path.exists(CACHE_FILE):
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+    migrated = sorted(glob.glob(os.path.join(DATA_DIR, "feed_legacy_cache_*.json")))
+    for path in (CACHE_FILE, *reversed(migrated), LEGACY_CACHE_FILE):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
                 c = json.load(f)
-                if isinstance(c, dict) and isinstance(c.get("units"), list):
-                    return c
-    except Exception:
-        pass
+            if isinstance(c, dict) and isinstance(c.get("units"), list):
+                if path != CACHE_FILE:
+                    _write_cache_file(c)
+                return c
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            pass
     return None
+
+
+def _write_cache_file(cache):
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        tmp = CACHE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False)
+        os.replace(tmp, CACHE_FILE)
+    except OSError as exc:
+        print("[feed] promote legacy cache failed: %s" % exc, flush=True)
 
 
 def _write_cache(prompt, units):
     try:
-        tmp = CACHE_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"prompt": prompt, "units": units, "updated_at": time.time()},
-                      f, ensure_ascii=False)
-        os.replace(tmp, CACHE_FILE)
-        # 2026-10-07：新资讯追加到历史（分页用）
+        cache = {"prompt": prompt, "units": units, "updated_at": time.time()}
+        _write_cache_file(cache)
         _append_history(units)
-    except Exception:
-        pass
+    except Exception as exc:
+        print("[feed] cache/history write failed: %s" % exc, flush=True)
 
 
 def _generate(prompt, limit):

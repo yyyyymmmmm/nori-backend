@@ -118,6 +118,34 @@ ok "代码已更新到 $(git rev-parse --short HEAD)"
 command -v docker >/dev/null 2>&1 || die "未安装 docker"
 docker compose version >/dev/null 2>&1 || die "未安装 docker compose 插件"
 
+# v4.0.x feed history migration: the previous feed release kept its six-card
+# cache/history in container /tmp. Save a snapshot into the persistent ./data
+# bind mount before compose recreates the container (and erases /tmp).
+_snapshot_legacy_feed_files() {
+  local _container _stamp _src _dst _kind
+  _container="$(docker compose ps -q qingliao 2>/dev/null || true)"
+  [ -n "$_container" ] || return 0
+  mkdir -p data || die "无法创建 data 目录，不能安全迁移资讯缓存"
+  _stamp="$(date +%Y%m%d-%H%M%S)"
+  for _kind in cache history; do
+    if [ "$_kind" = "cache" ]; then
+      _src="/tmp/qingliao_feed_cache.json"
+    else
+      _src="/tmp/qingliao_feed_history.json"
+    fi
+    if docker exec "$_container" test -s "$_src"; then
+      docker exec "$_container" python3 -m json.tool "$_src" >/dev/null 2>&1 \
+        || die "容器内旧资讯文件 $_src 不是有效 JSON；已停止更新，避免重建容器后丢失数据"
+      _dst="data/feed_legacy_${_kind}_${_stamp}.json"
+      docker cp "$_container:$_src" "$_dst" >/dev/null \
+        || die "无法备份容器内 $_src；已停止更新，避免丢失旧资讯"
+      ok "旧资讯 ${_kind} 已迁入持久目录：$_dst"
+    fi
+  done
+}
+
+_snapshot_legacy_feed_files
+
 say ""
 say "→ 重建并启动容器..."
 # v4.0.13：把版本信息注入镜像，供 /api/version 读取（用户零感知，不用改 .env）
