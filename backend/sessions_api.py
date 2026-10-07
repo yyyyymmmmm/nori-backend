@@ -273,8 +273,8 @@ class SessionsHandler(http.server.BaseHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             sid = (qs.get("sessionId") or [""])[0]
             try:
-                before = max(0, int((qs.get("before") or [""])[0]))
-                limit = min(300, max(1, int((qs.get("limit") or ["100"])[0])))
+                before = int((qs.get("before") or ["0"])[0] or "0")
+                limit = min(300, max(1, int((qs.get("limit") or ["100"])[0] or "100")))
             except ValueError:
                 self._send_json(400, {"ok": False, "error": "invalid cursor"})
                 return
