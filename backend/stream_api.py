@@ -2165,7 +2165,7 @@ def _hermes_stream_worker(task_id, task, req_body, headers, last_write, url=None
     st = task["state"]
     try:
         body = json.dumps(req_body).encode("utf-8")
-        target = url or HERMES_URL
+        target = url or hermes_upstream.chat_completions_url()
         req = urllib.request.Request(target, data=body, headers=headers)
         open("/tmp/hermes_worker_debug.log", "a").write("REQ session=" + headers.get("X-Hermes-Session-Id", "NONE") + " url=" + target + chr(10))
         resp = urllib.request.urlopen(req, timeout=900)
@@ -2290,7 +2290,7 @@ def _hermes_responses_worker(task_id, task, req_body, headers, last_write):
     hb_thread.start()
     try:
         body = json.dumps(req_body).encode("utf-8")
-        target = HERMES_RESPONSES_URL
+        target = hermes_upstream.responses_url()
         req = urllib.request.Request(target, data=body, headers=headers)
         open("/tmp/hermes_worker_debug.log", "a").write(
             "REQ(responses) session=" + headers.get("X-Hermes-Session-Id", "NONE") + " url=" + target + chr(10))
@@ -3062,7 +3062,7 @@ class StreamHandler(BaseHTTPRequestHandler):
                 if provider:
                     req_body["provider"] = provider
                 body = json.dumps(req_body).encode("utf-8")
-                req = urllib.request.Request(HERMES_URL, data=body, headers={
+                req = urllib.request.Request(hermes_upstream.chat_completions_url(), data=body, headers={
                     "Authorization": "Bearer " + hermes_upstream.get_key(),  # 2026-10-07：裸 HERMES_KEY 会 NameError
                     "Content-Type": "application/json"
                 })
