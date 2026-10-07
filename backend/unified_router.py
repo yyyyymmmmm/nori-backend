@@ -31,6 +31,7 @@ ROUTE_TABLE = {
     "/api/logs":      ("logs_api",     "LogsHandler"),
     "/api/files":     ("files_api",    "FilesHandler"),
     "/api/sessions":  ("sessions_api", "SessionsHandler"),
+    "/api/sessions/messages": ("sessions_api", "SessionsHandler"),
     "/api/auth":      ("auth_api",     "AuthHandler"),
     "/api/cron":      ("cron_api",     "Handler"),
     "/api/secrets":   ("secrets_api",  "Handler"),

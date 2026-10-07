@@ -119,14 +119,28 @@ class MemoryHandler(BaseHTTPRequestHandler):
             if not text:
                 self._send(200, {"ok": False, "message": "内容不能为空"})
                 return
-            memory_store.add_entry(text)
+            added = memory_store.add_entry(text)
+            if not added and text in memory_store.list_entries():
+                self._send(409, {"ok": False, "message": "记忆已存在"})
+                return
+            if not added:
+                self._send(500, {"ok": False, "message": "本地记忆写入失败"})
+                return
             # 2026-10-07：写闭环 —— 同步写 Hermes 的 MEMORY.md
             try:
                 import hermes_inspect
-                hermes_inspect.append_hermes_memory(text)
-            except Exception:
-                pass
-            self._send(200, {"ok": True, "message": "已记住", "entries": memory_store.list_entries()})
+                ok, detail = hermes_inspect.append_hermes_memory(text)
+            except Exception as exc:
+                ok, detail = False, str(exc)[:160]
+            if not ok:
+                # Roll back the local mirror so the API never reports a false successful write.
+                if added:
+                    memory_store.delete_entry(text)
+                self._send(503, {"ok": False, "message": "写入 Hermes 记忆失败",
+                                 "error": str(detail)[:160], "entries": memory_store.list_entries()})
+                return
+            self._send(200, {"ok": True, "message": "已写入 Hermes 记忆",
+                             "entries": memory_store.list_entries()})
             return
         if parsed.path.startswith("/api/memory/delete"):
             text = (body.get("text") or "").strip()

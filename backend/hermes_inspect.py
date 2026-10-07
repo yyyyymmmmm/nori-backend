@@ -112,16 +112,30 @@ def exec_in_hermes(cmd):
     if isinstance(out, str):
         raw = out.encode("utf-8", "replace")
     else:
-        raw = str(out).encode("utf-8", "replace")
+        raw = out if isinstance(out, bytes) else str(out).encode("utf-8", "replace")
     text = b""
     i = 0
     while i + 8 <= len(raw):
         size = int.from_bytes(raw[i + 4:i + 8], "big")
+        if i + 8 + size > len(raw):
+            return False, "invalid Docker exec output frame"
         text += raw[i + 8:i + 8 + size]
         i += 8 + size
         if size == 0:
             break
-    return True, text.decode("utf-8", "replace")
+    if i < len(raw):
+        return False, "incomplete Docker exec output frame"
+    output = text.decode("utf-8", "replace")
+    # Docker exec output and process exit status are separate API results.
+    inspect_status, inspect_data = _docker_api("GET", "/exec/%s/json" % exec_id)
+    if inspect_status != 200 or not isinstance(inspect_data, dict):
+        return False, "exec status unavailable: %s" % str(inspect_data)[:100]
+    if inspect_data.get("Running"):
+        return False, "exec still running; cannot verify command result"
+    exit_code = inspect_data.get("ExitCode")
+    if exit_code != 0:
+        return False, output.strip() or "Hermes command exited with status %s" % exit_code
+    return True, output
 
 
 def read_hermes_file(path):
@@ -296,6 +310,27 @@ def get_hermes_models():
     return True, models
 
 
+def get_selected_hermes_model():
+    """Return the exact model/provider selected in Hermes config, without defaults."""
+    ok, cfg = get_hermes_config()
+    if not ok or not isinstance(cfg, dict):
+        return False, None
+    model = cfg.get("model")
+    if isinstance(model, dict):
+        model_id = model.get("default") or model.get("id") or model.get("name")
+        provider = model.get("provider")
+    else:
+        model_id, provider = model, None
+    if not model_id:
+        model_id = cfg.get("default_model") or cfg.get("current_model")
+    if not isinstance(model_id, str) or not model_id.strip():
+        return False, None
+    model_id = model_id.strip()
+    provider = str(provider or "").strip()
+    return True, {"id": model_id, "name": model_id,
+                  "provider": provider or "hermes", "selected": True}
+
+
 def get_hermes_memory():
     """读 Hermes 的记忆文件。返回 {MEMORY.md: content, USER.md: content}。"""
     mem = {}
@@ -317,40 +352,55 @@ def append_hermes_memory(text):
     # base64 编码后解码写入，防特殊字符
     import base64
     line = "- [%s] %s\n" % (ts, text.replace("\n", " "))
+    existing_ok, existing = read_hermes_file(path)
+    if existing_ok and line.strip() in existing:
+        return True, "already present"
     b64 = base64.b64encode(line.encode("utf-8")).decode("ascii")
     cmd = "mkdir -p /home/agent/.hermes/memories && echo '%s' | base64 -d >> '%s'" % (b64, path)
     ok, out = exec_in_hermes(cmd)
-    return ok, out if not ok else "ok"
+    if not ok:
+        return False, out
+    verify_ok, content = read_hermes_file(path)
+    if not verify_ok or line.strip() not in content:
+        return False, "Hermes memory write verification failed"
+    return True, "ok"
 
 
 def set_hermes_model(model_id, provider=None):
     """切换 Hermes 配置中的模型。返回 (ok, msg)。
     2026-10-07：修复模型切换只写后端不写 Hermes 的问题。"""
     import base64
+    model_id = str(model_id or "").strip()
+    provider = str(provider or "").strip() or None
+    if not model_id:
+        return False, "model_id required"
     # 用 Python 在容器内改 YAML（避免 sed 转义问题）
-    script = '''
-import yaml, sys
-p = "/home/agent/.hermes/config.yaml"
-try:
-    d = yaml.safe_load(open(p)) or {}
-except Exception as e:
-    print("read fail: %s" % e); sys.exit(1)
-m = d.get("model")
-if not isinstance(m, dict):
-    m = {}
-    d["model"] = m
-m["default"] = """ + '"""' + model_id.replace('"', '\\"') + '"""' + '''
-if """ + ('"' + (provider or "").replace('"', '\\"') + '"' if provider else 'None') + ''':
-    m["provider"] = """ + ('"' + (provider or "").replace('"', '\\"') + '"' if provider else 'm.get("provider")') + '''
-try:
-    yaml.safe_dump(d, open(p, "w"), allow_unicode=True)
-    print("ok")
-except Exception as e:
-    print("write fail: %s" % e); sys.exit(1)
-'''
+    script = "\n".join([
+        "import yaml, sys",
+        'p = "/home/agent/.hermes/config.yaml"',
+        "try:",
+        "    d = yaml.safe_load(open(p)) or {}",
+        "except Exception as e:",
+        '    print("read fail: %s" % e); sys.exit(1)',
+        'm = d.get("model")',
+        "if not isinstance(m, dict):",
+        "    m = {}",
+        '    d["model"] = m',
+        'm["default"] = ' + json.dumps(model_id, ensure_ascii=False),
+        *(['m["provider"] = ' + json.dumps(provider, ensure_ascii=False)] if provider else []),
+        "try:",
+        '    yaml.safe_dump(d, open(p, "w"), allow_unicode=True)',
+        '    print("ok")',
+        "except Exception as e:",
+        '    print("write fail: %s" % e); sys.exit(1)',
+        "",
+    ])
     b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
     cmd = "echo '%s' | base64 -d | python3" % b64
     ok, out = exec_in_hermes(cmd)
     if not ok or "ok" not in out:
         return False, out[:200]
+    verify_ok, selected = get_selected_hermes_model()
+    if not verify_ok or selected["id"] != model_id or (provider and selected["provider"] != provider):
+        return False, "Hermes model selection verification failed"
     return True, "ok"

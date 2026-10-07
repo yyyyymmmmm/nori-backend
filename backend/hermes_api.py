@@ -232,7 +232,13 @@ class Handler(BaseHTTPRequestHandler):
         if self._is_inspect_hermes_models(path):
             import hermes_inspect
             ok, models = hermes_inspect.get_hermes_models()
-            self._send(200, {"ok": ok, "models": models, "count": len(models)})
+            selected_ok, selected = hermes_inspect.get_selected_hermes_model()
+            if selected:
+                for model in models:
+                    model["selected"] = (model.get("id") == selected["id"]
+                                         and model.get("provider") == selected["provider"])
+            self._send(200, {"ok": bool(ok and selected_ok), "models": models,
+                             "selected": selected, "count": len(models)})
             return
         # v4.4.x：AI 内容生成（点子/今日建议）——提示词后端统一管，iOS 只展示
         if self._is_ideas(path):
@@ -354,9 +360,10 @@ class Handler(BaseHTTPRequestHandler):
             if not ok:
                 self._send(200, {"ok": False, "error": "切换 Hermes 模型失败: %s" % msg})
                 return
-            # 同时更新后端上游配置（保持兼容）
-            ok2, err = hermes_upstream.save_selected_model(mid, pid or None)
-            # 后端配置失败不阻断（Hermes 配置已生效）
+            if not hermes_upstream.save_selected_model(mid, pid or None)[0]:
+                self._send(200, {"ok": False, "error": "Hermes 已切换，但后端兼容配置未同步，请重试确认"})
+                return
+            # Keep the compatibility cache aligned with Hermes before confirming success.
             self._send(200, {"ok": True})
             return
         if self._is_models_hide(path):
@@ -393,8 +400,12 @@ class Handler(BaseHTTPRequestHandler):
             if not ok:
                 self._send(200, {"ok": False, "error": err})
                 return
+            if not restarted:
+                self._send(200, {"ok": False, "error": "技能配置已保存，但 Hermes 网关重启失败",
+                                 "restart": "failed", "saved": True})
+                return
             self._send(200, {"ok": True,
-                             "restart": "triggered" if restarted else "failed"})
+                             "restart": "triggered"})
             return
         if self._is_suggestions(path):
             # 2026-10-07：健康 AI 联动 —— 接收 iOS 发来的健康摘要，喂给 Hermes 生成个性化建议

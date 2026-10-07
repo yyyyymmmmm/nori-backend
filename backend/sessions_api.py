@@ -268,6 +268,40 @@ class SessionsHandler(http.server.BaseHTTPRequestHandler):
 
             self._send_json(200, {"ok": True, "sessions": sessions, "total": len(sessions)})
             return
+        if self.path.startswith('/api/sessions/messages'):
+            from urllib.parse import parse_qs, urlparse
+            qs = parse_qs(urlparse(self.path).query)
+            sid = (qs.get("sessionId") or [""])[0]
+            try:
+                before = max(0, int((qs.get("before") or [""])[0]))
+                limit = min(300, max(1, int((qs.get("limit") or ["100"])[0])))
+            except ValueError:
+                self._send_json(400, {"ok": False, "error": "invalid cursor"})
+                return
+            if not sid:
+                self._send_json(400, {"ok": False, "error": "sessionId required"})
+                return
+            if len(sid) > 128 or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for ch in sid):
+                self._send_json(400, {"ok": False, "error": "invalid sessionId"})
+                return
+            if before < 0:
+                self._send_json(400, {"ok": False, "error": "invalid cursor"})
+                return
+            session = next((s for s in load_sessions() if s.get("id") == sid), None)
+            if session is None:
+                self._send_json(404, {"ok": False, "error": "session not found"})
+                return
+            messages = session.get("messages") or []
+            end = min(before, len(messages)) if before else len(messages)
+            start = max(0, end - limit)
+            page = messages[start:end]
+            for message in page:
+                if message.get("role") == "assistant" and isinstance(message.get("content"), str) and "MEDIA:" in message["content"]:
+                    message["content"] = media_convert.convert_media_marks(message["content"])
+            self._send_json(200, {"ok": True, "sessionId": sid, "messages": page,
+                                  "start": start, "end": end, "total": len(messages),
+                                  "hasMore": start > 0})
+            return
         self._send_json(404, {"error": "not found"})
 
     def do_POST(self):

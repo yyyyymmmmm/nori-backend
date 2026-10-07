@@ -111,6 +111,8 @@ class Handler(BaseHTTPRequestHandler):
             "id": uuid.uuid4().hex[:10],
             "text": text,
             "created": int(time.time()),
+            "source": str(body.get("source") or "manual")[:32],
+            "audioPath": str(body.get("audioPath") or "")[:512],
         }
         with _lock:
             notes = _load(path)

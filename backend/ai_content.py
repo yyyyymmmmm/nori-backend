@@ -45,7 +45,7 @@ def _call_ai(prompt, timeout=60):
 
 
 _IDEAS_CACHE = {"ts": 0, "date": "", "data": []}
-_SUGGEST_CACHE = {"ts": 0, "date": "", "data": []}
+_SUGGEST_CACHE = {"ts": 0, "date": "", "data": [], "health": ""}
 _CACHE_TTL = 3600  # 1 小时
 
 
@@ -134,8 +134,9 @@ def get_suggestions(force=False, health_context=None):
     today = _today()
     c = _SUGGEST_CACHE
     # 有健康数据时不走缓存（每次都要个性化）
-    if not force and not health_context and c["date"] == today and c["data"]:
-        return {"suggestions": c["data"], "fallback": False}
+    if not force and c["date"] == today and c["data"] and c.get("health", "") == (health_context or ""):
+        return {"suggestions": c["data"], "fallback": False,
+                "personalized": bool(health_context)}
     date_str = time.strftime("%m月%d日 %A")
     prompt = _SUGGEST_PROMPT % (date_str, _time_desc())
     if health_context:
@@ -152,9 +153,11 @@ def get_suggestions(force=False, health_context=None):
                     "prompt": str(d["prompt"]),
                 })
     if valid:
-        c.update({"ts": time.time(), "date": today, "data": valid})
-        return {"suggestions": valid, "fallback": False}
+        c.update({"ts": time.time(), "date": today, "data": valid,
+                  "health": health_context or ""})
+        return {"suggestions": valid, "fallback": False,
+                "personalized": bool(health_context)}
     return {"suggestions": [
         {"title": "规划今天", "reason": "通用建议", "prompt": "帮我规划一下今天的日程"},
         {"title": "健康提醒", "reason": "通用建议", "prompt": "提醒我今天的健康目标"},
-    ], "fallback": True}
+    ], "fallback": True, "personalized": False}
